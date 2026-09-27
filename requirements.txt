@@ -1,0 +1,16 @@
+# ---- core pipeline ----
+numpy
+requests
+sounddevice
+SpeechRecognition>=3.10
+pyaudio
+faster-whisper>=1.0
+piper-tts>=1.3.0
+
+# ---- PC control skills ----
+psutil
+pyautogui
+pyperclip
+pycaw
+comtypes
+screen-brightness-control

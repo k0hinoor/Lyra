@@ -1,0 +1,87 @@
+"""
+============================================================
+ LYRA EARS
+============================================================
+ Speech-to-text with faster-whisper.
+
+ Speed tricks:
+ - transcribes straight from RAM (no WAV file on disk)
+ - beam size 1, VAD trimmed, no timestamps
+ - 16 kHz mono int8 on CPU
+============================================================
+"""
+
+import numpy as np
+
+from . import config
+
+
+class Ear:
+
+    def __init__(self):
+
+        from faster_whisper import WhisperModel
+
+        print(f"Loading Whisper ({config.WHISPER_MODEL})...")
+
+        self.model = WhisperModel(
+            config.WHISPER_MODEL,
+            device=config.WHISPER_DEVICE,
+            compute_type=config.WHISPER_COMPUTE,
+        )
+
+        # tiny warm-up so the first real command is not slower
+        silence = np.zeros(8000, dtype=np.float32)
+        list(self.model.transcribe(silence, language="en"))
+
+        print("Whisper ready.")
+
+    # --------------------------------------------------------
+    # TRANSCRIBE
+    # --------------------------------------------------------
+
+    def transcribe_audio(self, audio_data):
+        """
+        audio_data: speech_recognition.AudioData
+        Returns the transcript string ('' on failure).
+        """
+
+        try:
+            raw = audio_data.get_raw_data(
+                convert_rate=16000,
+                convert_width=2
+            )
+        except Exception as e:
+            print(f"Audio read error: {e}")
+            return ""
+
+        audio_array = np.frombuffer(raw, dtype=np.int16)
+        audio_array = audio_array.astype(np.float32) / 32768.0
+
+        try:
+
+            segments, _info = self.model.transcribe(
+
+                audio_array,
+
+                language="en",
+                temperature=0.0,
+                beam_size=config.WHISPER_BEAM,
+
+                vad_filter=True,
+                vad_parameters={
+                    "min_silence_duration_ms": 400,
+                    "speech_pad_ms": 200,
+                },
+
+                condition_on_previous_text=False,
+                without_timestamps=True,
+            )
+
+            text = " ".join(segment.text for segment in segments)
+
+            return text.strip()
+
+        except Exception as e:
+            print(f"Transcribe error: {e}")
+            return ""
