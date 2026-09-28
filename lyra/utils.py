@@ -87,7 +87,7 @@ def strip_politeness(text):
 # ------------------------------------------------------------
 
 _NAME_PATTERN = re.compile(
-    r"\b(" + "|".join(config.WAKE_ALIASES) + r")\b",
+    r"\b(" + "|".join(config.WAKE_ALIASES + ["liara", "yara"]) + r")\b",
     re.IGNORECASE
 )
 
@@ -102,31 +102,57 @@ def correct_name(text):
 # WAKE WORD MATCHING
 # ------------------------------------------------------------
 
+def _edit_distance(left, right, max_distance=None):
+    """Small bounded Levenshtein distance, sufficient for one wake token."""
+    if abs(len(left) - len(right)) > (max_distance if max_distance is not None else max(len(left), len(right))):
+        return (max_distance or 0) + 1
+    previous = list(range(len(right) + 1))
+    for row, char_left in enumerate(left, 1):
+        current = [row]
+        for column, char_right in enumerate(right, 1):
+            current.append(min(
+                current[-1] + 1,
+                previous[column] + 1,
+                previous[column - 1] + (char_left != char_right),
+            ))
+        if max_distance is not None and min(current) > max_distance:
+            return max_distance + 1
+        previous = current
+    return previous[-1]
+
+
+def _is_wake_name(token, fuzzy=False):
+    token = token.casefold()
+    if token in config.WAKE_ALIASES:
+        return True
+    if token in config.WAKE_EXPLICIT_VARIANTS:
+        return True
+    if fuzzy:
+        return min(
+            (_edit_distance(token, candidate, config.WAKE_FUZZY_MAX_DISTANCE)
+             for candidate in ("lyra", "laira", "lira", "laura", "later", "leyra", "leira", "lyrah")),
+            default=99,
+        ) <= config.WAKE_FUZZY_MAX_DISTANCE
+    return False
+
+
 def strip_wake_word(normalized_text):
-    """
-    Detect 'lyra' / 'hey lyra' / 'ok lyra' ... at the start.
+    """Match a wake phrase at the utterance start without broad word lists.
 
-    Returns (matched, remainder).
-    remainder == ""  means the user only said the wake word.
+    Fuzzy matching is restricted to the name immediately after a wake prefix;
+    ordinary speech such as "see you later" therefore cannot wake LYRA.
     """
-
     tokens = normalized_text.split()
-
     if not tokens:
         return False, ""
 
-    # "hey lyra ..." style
-    if (
-        len(tokens) >= 2
-        and tokens[0] in config.WAKE_PREFIXES
-        and tokens[1] in config.WAKE_ALIASES
-    ):
-        return True, " ".join(tokens[2:]).strip()
+    if len(tokens) >= 2 and tokens[0] in config.WAKE_PREFIXES:
+        if _is_wake_name(tokens[1], fuzzy=True):
+            return True, " ".join(tokens[2:]).strip()
+        return False, normalized_text
 
-    # "lyra ..." style
-    if tokens[0] in config.WAKE_ALIASES:
+    if tokens[0] == config.WAKE_WORD:
         return True, " ".join(tokens[1:]).strip()
-
     return False, normalized_text
 
 

@@ -15,7 +15,9 @@
 """
 
 import argparse
+import logging
 import re
+import threading
 import time
 
 from lyra import config
@@ -36,6 +38,20 @@ from lyra.utils import (
 # SESSION
 # ============================================================
 
+log = logging.getLogger(__name__)
+
+
+def _looks_like_multistep_computer_task(text):
+    """Avoid an extra planner LLM request for normal chat/simple skills."""
+    text = normalize(text)
+    has_connector = bool(re.search(r"\b(?:and then|then|and)\b", text))
+    verbs = re.findall(
+        r"\b(?:open|launch|start|write|type|press|click|double click|right click|"
+        r"move|scroll|drag|drop)\b", text
+    )
+    return has_connector and len(verbs) >= 2
+
+
 class Session:
     """
     One conversation session. Handles routing, pending
@@ -47,6 +63,15 @@ class Session:
         self.memory = memory
         self.voice = voice
         self.pending_confirmation = None
+        from lyra.actions.executor import ActionExecutor
+        self.task_executor = ActionExecutor()
+        self.task_active = False
+        self.async_task_execution = False
+        self._task_thread = None
+
+    def stop_active_task(self):
+        """Cancellation hook used by UI/voice integrations and emergency controls."""
+        self.task_executor.request_stop()
 
     # --------------------------------------------------------
     # OUTPUT
@@ -92,8 +117,9 @@ class Session:
 
             try:
                 confirmation.action()
-            except Exception as e:
-                print(f"Action error: {e}")
+            except Exception as error:
+                log.exception("Confirmed action failed")
+                print(f"Action error: {error}")
 
             if self.voice is not None:
                 self.voice.speak(say_on_confirm)
@@ -170,6 +196,51 @@ class Session:
 
         return None, None
 
+    def _execute_planned_task(self, raw):
+        try:
+            plan = self.brain.plan_actions(raw)
+            if self.task_executor.stop_requested:
+                self.say("The task was stopped before any action was run.")
+                return
+            if plan is None:
+                self.say("I couldn't create a valid, safe action plan for that task.")
+                return
+            result = self.task_executor.run(
+                plan,
+                generate_text=lambda instruction: " ".join(
+                    self.brain.ask_stream(instruction)
+                ).strip(),
+            )
+            if result.status.value == "FAILURE":
+                failed = next((item for item in result.results if item.status.value == "FAILURE"), None)
+                detail = failed.detail if failed else "An action failed."
+                self.say("The task stopped because an action failed: " + detail[:180])
+            elif result.status.value == "STOPPED":
+                self.say("The task was stopped.")
+            else:
+                self.say("I issued the planned actions. Their on-screen results are not yet independently verified.")
+        except Exception:
+            log.exception("Unexpected task execution error")
+            self.say("The task stopped because of an internal action error. See the LYRA log.")
+        finally:
+            self.task_active = False
+
+    def _start_planned_task(self, raw):
+        if self.task_active:
+            self.say("I am already working on a computer task. Say stop to cancel it.")
+            return
+        self.task_executor.reset_stop()
+        self.task_active = True
+        if self.async_task_execution:
+            self._task_thread = threading.Thread(
+                target=self._execute_planned_task, args=(raw,), daemon=True,
+                name="lyra-computer-task",
+            )
+            self.say("Planning and carrying out the task. Say stop to cancel it.")
+            self._task_thread.start()
+        else:
+            self._execute_planned_task(raw)
+
     # --------------------------------------------------------
     # PROCESS ONE COMMAND
     # --------------------------------------------------------
@@ -185,15 +256,33 @@ class Session:
 
         # terminate
         if is_terminate(normalized):
+            self.stop_active_task()
             self.say("Going offline. Goodbye.")
             return True
+
+        if normalized in {"stop", "stop task", "cancel task", "abort task"} and self.task_active:
+            self.stop_active_task()
+            self.say("Stopping the active task safely.")
+            return False
+
+        if self.task_active:
+            self.say("I am still working. Say stop to cancel the active task.")
+            return False
 
         # pending shutdown/restart confirmations
         if self._check_confirmation(normalized):
             return False
 
+        if normalized in {"stop", "stop task", "cancel task", "abort task"}:
+            self.say("There is no active computer task.")
+            return False
+
         # memory commands (need the Memory instance, not in the skill router)
         reply, confirmation = self._handle_memory(normalized, raw)
+
+        if reply is None and confirmation is None and _looks_like_multistep_computer_task(raw):
+            self._start_planned_task(raw)
+            return False
 
         if reply is None and confirmation is None:
             # skills (PC control)
@@ -256,11 +345,14 @@ def run_voice_mode(session, always_listening):
 
     from lyra.ear import Ear
     from lyra.voice import Voice
+    from lyra.wake import WakeWordDetector
 
     ear = Ear()
+    wake_detector = WakeWordDetector()
 
     voice = Voice()
     session.voice = voice
+    session.async_task_execution = True
 
     recognizer = sr.Recognizer()
     recognizer.pause_threshold = config.PAUSE_THRESHOLD
@@ -302,17 +394,27 @@ def run_voice_mode(session, always_listening):
 
             try:
 
+                # Do not capture the assistant's own playback as user speech.
+                if voice.is_speaking:
+                    time.sleep(0.1)
+                    continue
+
                 # ------------------------------------------------
                 # LISTEN
                 # ------------------------------------------------
 
-                state = "awake" if time.time() < awake_until else "asleep"
+                state = "awake" if session.task_active or time.time() < awake_until else "asleep"
 
                 try:
+                    phrase_limit = (
+                        config.WAKE_WINDOW_SECONDS
+                        if state == "asleep" and not always_listening
+                        else config.PHRASE_TIME_LIMIT
+                    )
                     audio = recognizer.listen(
                         source,
                         timeout=config.LISTEN_TIMEOUT,
-                        phrase_time_limit=config.PHRASE_TIME_LIMIT,
+                        phrase_time_limit=phrase_limit,
                     )
                 except sr.WaitTimeoutError:
                     if state == "awake" and time.time() >= awake_until:
@@ -320,10 +422,32 @@ def run_voice_mode(session, always_listening):
                     continue
 
                 # ------------------------------------------------
-                # TRANSCRIBE
+                # WAKE GATE / COMMAND TRANSCRIPTION
                 # ------------------------------------------------
 
-                heard = ear.transcribe_audio(audio)
+                lightweight_wake_hit = False
+                wake_gate_matched = False
+                wake_gate_remainder = ""
+                if not always_listening and state == "asleep":
+                    matched, _wake_remainder, wake_transcript = wake_detector.detect(
+                        audio, fallback_transcriber=ear.transcribe_audio
+                    )
+                    # Keep the global spoken termination phrase available in
+                    # lightweight mode; it is checked before the normal wake gate.
+                    if is_terminate(normalize(wake_transcript)):
+                        session.stop_active_task()
+                        session.say("Going offline. Goodbye.")
+                        break
+                    if not matched:
+                        continue
+                    wake_gate_matched = True
+                    wake_gate_remainder = _wake_remainder
+                    lightweight_wake_hit = wake_detector.lightweight
+                    # Run command-quality Whisper only on the short clip after
+                    # the inexpensive wake recognizer has accepted a wake phrase.
+                    heard = ear.transcribe_audio(audio) if lightweight_wake_hit else wake_transcript
+                else:
+                    heard = ear.transcribe_audio(audio)
 
                 if not heard:
                     continue
@@ -334,6 +458,7 @@ def run_voice_mode(session, always_listening):
 
                 # terminate works in every mode, no wake word needed
                 if is_terminate(normalized):
+                    session.stop_active_task()
                     session.say("Going offline. Goodbye.")
                     break
 
@@ -367,6 +492,11 @@ def run_voice_mode(session, always_listening):
                     else:
 
                         matched, remainder = strip_wake_word(normalized)
+                        if not matched and wake_gate_matched:
+                            # Vosk has already verified the wake shape. If the
+                            # higher-accuracy recognizer drops the wake phrase,
+                            # retain Vosk's remainder rather than losing wake.
+                            matched, remainder = True, wake_gate_remainder
 
                         if not matched:
                             continue        # background chatter — ignore
@@ -394,6 +524,7 @@ def run_voice_mode(session, always_listening):
             # ====================================================
 
             except KeyboardInterrupt:
+                session.stop_active_task()
                 voice.stop()
                 print()
                 print("Lyra stopped by user.")
@@ -403,10 +534,11 @@ def run_voice_mode(session, always_listening):
             # OTHER ERRORS
             # ====================================================
 
-            except Exception as e:
-                print(f"Error: {e}")
+            except Exception:
+                log.exception("Unexpected voice-loop error")
                 continue
 
+    voice.stop()
     print()
     print("Lyra offline.")
 
@@ -444,6 +576,9 @@ def main():
     parser.add_argument("--devices", action="store_true",
                         help="list audio output devices and exit")
     args = parser.parse_args()
+
+    from lyra.logging_setup import configure_logging
+    configure_logging(config.LOG_DIR, config.LOG_LEVEL)
 
     if args.devices:
         list_devices()

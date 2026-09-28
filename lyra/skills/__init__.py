@@ -8,6 +8,8 @@
 ============================================================
 """
 
+import logging
+
 from .base import Confirmation
 from . import apps
 from . import fun
@@ -16,6 +18,8 @@ from . import system
 from . import typing
 from . import web
 from . import windows
+
+log = logging.getLogger(__name__)
 
 _SKILLS = (
     typing,     # type/press/copy/paste — very specific verbs first
@@ -44,8 +48,8 @@ def route(text, raw=None):
         try:
             result = skill.handle(text, raw)
 
-        except Exception as e:
-            print(f"[skill:{getattr(skill, 'name', skill)}] {e}")
+        except Exception:
+            log.exception("Skill %s failed", getattr(skill, "name", skill))
             result = None
 
         if result is None:

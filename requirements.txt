@@ -6,6 +6,8 @@ SpeechRecognition>=3.10
 pyaudio
 faster-whisper>=1.0
 piper-tts>=1.3.0
+vosk>=0.3.45
+pygetwindow>=0.0.9
 
 # ---- PC control skills ----
 psutil

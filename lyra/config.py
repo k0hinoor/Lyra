@@ -7,17 +7,28 @@
 ============================================================
 """
 
+import json
+import os
+import sys
 from pathlib import Path
 
 # ------------------------------------------------------------
-# PATHS
+# PATHS / USER DATA
 # ------------------------------------------------------------
 
 BASE_DIR = Path(__file__).resolve().parent.parent
-MODELS_DIR = BASE_DIR / "models"
-VOICE_DIR = MODELS_DIR / "voice"
+if os.environ.get("LYRA_DATA_DIR"):
+    DATA_DIR = Path(os.environ["LYRA_DATA_DIR"]).expanduser()
+elif sys.platform.startswith("win"):
+    DATA_DIR = Path(os.environ.get("APPDATA", Path.home() / "AppData" / "Roaming")) / "Lyra"
+else:
+    DATA_DIR = Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local" / "share")) / "lyra"
 
-MEMORY_FILE = BASE_DIR / "memory.json"
+MODELS_DIR = DATA_DIR / "models"
+VOICE_DIR = MODELS_DIR / "voice"
+MEMORY_FILE = DATA_DIR / "memory.json"
+SETTINGS_FILE = DATA_DIR / "settings.json"
+LOG_DIR = DATA_DIR / "logs"
 SCREENSHOT_DIR = Path.home() / "Pictures" / "Lyra"
 
 # ------------------------------------------------------------
@@ -71,7 +82,8 @@ WAKE_MODE = "wake"            # "wake" = say "Hey Lyra" first | "always" = react
 WAKE_WORD = "lyra"
 
 # How Whisper commonly mis-hears the name — all treated as the wake word.
-WAKE_ALIASES = ["lyra", "laira", "lira", "liara", "lara", "laura", "yara", "lyrah", "lerae"]
+WAKE_ALIASES = ["lyra", "laira", "lira", "laura", "later", "leyra", "leira", "lyrah"]
+WAKE_EXPLICIT_VARIANTS = ["bobby"]  # accepted only after a wake prefix, per user testing
 
 WAKE_PREFIXES = ["hey", "ok", "okay", "hi", "hello", "yo", "hay"]
 
@@ -103,3 +115,79 @@ SHUTDOWN_DELAY = 5            # seconds between confirmed shutdown and the actua
 
 MAX_VOLUME = 100
 MAX_BRIGHTNESS = 100
+
+# Optional user overrides. Only known, non-secret settings are read here;
+# environment variables (LYRA_OLLAMA_MODEL, etc.) take precedence.
+WAKE_VOSK_MODEL_DIR = MODELS_DIR / "vosk-model-small-en-us-0.15"
+WAKE_WINDOW_SECONDS = 4.0
+WAKE_FUZZY_MAX_DISTANCE = 2
+LOG_LEVEL = "INFO"
+GITHUB_REPOSITORY = "k0hinoor/Lyra"
+
+_SETTINGS = {
+    "OLLAMA_MODEL": "OLLAMA_MODEL",
+    "VOICE_MODEL": "VOICE_MODEL",
+    "OUTPUT_DEVICE": "OUTPUT_DEVICE",
+    "WAKE_FUZZY_MAX_DISTANCE": "WAKE_FUZZY_MAX_DISTANCE",
+    "WAKE_WINDOW_SECONDS": "WAKE_WINDOW_SECONDS",
+    "WHISPER_MODEL": "WHISPER_MODEL",
+    "OLLAMA_URL": "OLLAMA_URL",
+    "LOG_LEVEL": "LOG_LEVEL",
+}
+try:
+    with SETTINGS_FILE.open("r", encoding="utf-8") as _settings_file:
+        _user_settings = json.load(_settings_file)
+    if isinstance(_user_settings, dict):
+        for _key, _target in _SETTINGS.items():
+            if _key not in _user_settings:
+                continue
+            _value = _user_settings[_key]
+            try:
+                if _target == "OUTPUT_DEVICE":
+                    _value = None if _value is None else int(_value)
+                elif _target == "WAKE_FUZZY_MAX_DISTANCE":
+                    _value = int(_value)
+                    if not 0 <= _value <= 2:
+                        raise ValueError("must be between 0 and 2")
+                elif _target == "WAKE_WINDOW_SECONDS":
+                    _value = float(_value)
+                    if not 1.0 <= _value <= 8.0:
+                        raise ValueError("must be between 1 and 8 seconds")
+                elif _target == "LOG_LEVEL":
+                    _value = str(_value).upper()
+                    if _value not in {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}:
+                        raise ValueError("invalid logging level")
+                elif not isinstance(_value, str) or not _value.strip():
+                    raise ValueError("must be a non-empty string")
+                globals()[_target] = _value
+            except (TypeError, ValueError) as _error:
+                import logging
+                logging.getLogger(__name__).warning("Ignoring invalid setting %s: %s", _key, _error)
+except FileNotFoundError:
+    pass
+except (OSError, ValueError) as _error:
+    import logging
+    logging.getLogger(__name__).warning("Could not load settings file: %s", _error)
+
+for _key, _target in _SETTINGS.items():
+    _env_key = "LYRA_" + _key
+    if _env_key in os.environ:
+        _value = os.environ[_env_key]
+        try:
+            if _target == "OUTPUT_DEVICE":
+                _value = int(_value)
+            elif _target == "WAKE_FUZZY_MAX_DISTANCE":
+                _value = int(_value)
+                if not 0 <= _value <= 2:
+                    continue
+            elif _target == "WAKE_WINDOW_SECONDS":
+                _value = float(_value)
+                if not 1.0 <= _value <= 8.0:
+                    continue
+            elif _target == "LOG_LEVEL":
+                _value = _value.upper()
+                if _value not in {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}:
+                    continue
+            globals()[_target] = _value
+        except ValueError:
+            continue

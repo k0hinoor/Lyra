@@ -11,9 +11,14 @@
 """
 
 import json
+import logging
 import threading
 
 import requests
+
+from .actions.schema import PlanValidationError, validate_plan
+
+log = logging.getLogger(__name__)
 
 from . import config
 from .utils import SentenceSplitter
@@ -82,7 +87,7 @@ class Brain:
             )
 
         except Exception:
-            pass                                # offline — handled per-request later
+            log.info("Ollama warm-up unavailable; requests will retry when needed", exc_info=True)
 
     # --------------------------------------------------------
     # PROMPT BUILDING
@@ -97,6 +102,56 @@ class Brain:
         messages.append({"role": "user", "content": user_text})
 
         return messages
+
+    # --------------------------------------------------------
+    # STRUCTURED COMPUTER TASK PLANNING
+    # --------------------------------------------------------
+
+    def plan_actions(self, user_text):
+        """Ask Ollama for a JSON plan; reject malformed or unsafe plans."""
+        instruction = (
+            "Convert the user's desktop task into a JSON action plan. "
+            "Return only an object with intent=computer_task and actions (1-8 items). "
+            "Allowed actions: open_app(app), generate_text(instruction), "
+            "type_text(source=generated_text), press_key(key), hotkey(keys), "
+            "move_mouse(x,y), click(button,clicks), scroll(direction,amount), "
+            "drag_drop(start_x,start_y,end_x,end_y).\n"
+            "For open_app, use a concise application name from the request. "
+            "For writing content: open_app, generate_text with the requested "
+            "content constraints, then type_text with source generated_text. "
+            "Never output commands, code, URLs to execute, file deletion, "
+            "system power actions, messages, emails, or unsupported actions. "
+            "Do not invent coordinates; only use coordinates explicitly supplied. "
+            "User task: " + user_text
+        )
+        try:
+            response = requests.post(
+                config.OLLAMA_URL,
+                json={
+                    "model": config.OLLAMA_MODEL,
+                    "messages": [
+                        {"role": "system", "content": "You produce constrained computer action JSON only."},
+                        {"role": "user", "content": instruction},
+                    ],
+                    "format": "json",
+                    "stream": False,
+                    "keep_alive": config.OLLAMA_KEEP_ALIVE,
+                    "options": {"temperature": 0, "num_predict": 300},
+                },
+                timeout=config.OLLAMA_TIMEOUT,
+            )
+            response.raise_for_status()
+            content = response.json().get("message", {}).get("content", "")
+            if not isinstance(content, str):
+                raise PlanValidationError("Ollama returned no JSON content")
+            plan = validate_plan(json.loads(content))
+            return plan
+        except (ValueError, PlanValidationError) as exc:
+            log.warning("Rejected malformed computer-action plan: %s", exc)
+            return None
+        except Exception:
+            log.exception("Computer-action planning request failed")
+            return None
 
     # --------------------------------------------------------
     # ASK (streaming)
@@ -163,7 +218,7 @@ class Brain:
 
         except Exception as e:
 
-            print(f"Ollama error: {e}")
+            log.exception("Ollama streaming request failed")
 
             if not spoke_anything:
                 yield CONNECTION_FALLBACK
