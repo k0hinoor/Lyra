@@ -1,9 +1,14 @@
 """
 ============================================================
- LYRA KEYBOARD TEST 01
+ LYRA KEYBOARD TEST 01  (live hardware check)
 ============================================================
- Smallest possible PC-control test. NOTHING else is loaded
- (no Whisper, no Ollama, no memory, no voice).
+ This one is NOT part of the normal test run: it opens a real
+ Notepad window and types into it with the real keyboard.
+
+ Run it deliberately, on a Windows machine, when you want to
+ prove the PC control path works end to end:
+
+     pytest -m manual -s
 
  What it does:
    1. Opens Windows Notepad
@@ -12,17 +17,18 @@
    4. Types the fixed sentence:  Lyra is working.
    5. Stops.
 
- Run:
-   python test_keyboard.py
-
  Emergency abort: slam the mouse into the TOP-LEFT corner
  of the screen (pyautogui failsafe), or Ctrl+C.
 ============================================================
 """
 
 import subprocess
-import sys
 import time
+
+import pytest
+
+pytestmark = pytest.mark.manual
+
 
 TYPE_TEXT = "Lyra is working."
 WINDOW_HINT = "notepad"          # matched case-insensitively in the window title
@@ -83,7 +89,8 @@ def focus_window(window, gw, pyautogui):
         return False
 
 
-def main():
+def run_keyboard_test():
+    """Returns an exit code: 0 = typed successfully, 1 = failed."""
 
     # --------------------------------------------------------
     # 0. DEPENDENCY CHECK
@@ -188,19 +195,13 @@ def main():
     print(f'   Notepad should now show:  "{TYPE_TEXT}"')
     print()
 
-    try:
-        input("   Press Enter to close this window...")
-    except EOFError:
-        pass
-
     return 0
 
 
-if __name__ == "__main__":
+def test_keyboard_typing():
+    """Live check: Notepad opens, takes focus, and gets the sentence typed in."""
 
-    try:
-        sys.exit(main())
-    except KeyboardInterrupt:
-        print()
-        print("Aborted by user (Ctrl+C). Nothing else was typed.")
-        sys.exit(1)
+    assert run_keyboard_test() == 0, (
+        f"Notepad did not end up with '{TYPE_TEXT}' typed into it. "
+        "See the output above for which step failed."
+    )
