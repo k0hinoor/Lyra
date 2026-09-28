@@ -273,6 +273,7 @@ pytest -m manual -s    :: live keyboard check — opens a REAL Notepad and types
 | persistent memory (add / dedupe / forget / context block) | `tests/test_memory.py` |
 | skill router: ordering, confirmations, error isolation | `tests/test_router.py` |
 | one file per skill — apps, web, media, system, typing, windows, fun | `tests/test_skills_*.py` |
+| Piper playback: voice-pack rate, sentence pipelining, silent mode | `tests/test_voice.py` |
 | Ollama streaming, prompt building, offline fallback | `tests/test_brain.py` |
 | session flow: memory commands, confirm/cancel, terminate | `tests/test_session.py` |
 | live keyboard check (opt-in, needs a real desktop) | `tests/manual/test_keyboard_live.py` |

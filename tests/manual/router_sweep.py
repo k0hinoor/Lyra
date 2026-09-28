@@ -61,19 +61,23 @@ CORPUS = [
 
     "type hello world", "press enter", "press escape", "press f5", "copy", "cut",
     "paste", "select all", "undo", "redo", "save", "find", "print",
+    "press the enter key", "press page up", "press the up arrow", "press ctrl c",
     "copy this to clipboard", "copy s r k to clipboard", "read my clipboard",
     "clear clipboard", "print screen",
 
     # ---- apps / web -----------------------------------------------
     "open notepad", "open calculator", "open spotify", "open chrome", "close chrome",
-    "open sound settings", "open display settings", "open settings", "open my music folder",
+    "open sound settings", "open display settings", "open storage settings",
+    "open battery settings", "open settings", "open my music folder",
     "open desktop", "open the pictures folder", "open settings for bluetooth",
     "search for best laptops", "google python tutorial", "wikipedia albert einstein",
-    "open youtube", "play beliver on youtube", "open google dot com",
+    "open youtube", "play beliver on youtube", "search youtube for lofi beats",
+    "open google dot com", "what's the weather", "what's the weather like in bhubaneswar",
 
     # ---- system ---------------------------------------------------
     "what time is it", "what's the date", "what day is it", "battery", "cpu usage",
-    "ram usage", "how is my pc", "disk space", "what's my ip", "uptime",
+    "ram usage", "how is my pc", "how much ram am i using", "disk space",
+    "how much storage is left", "open storage settings", "what's my ip", "uptime",
     "wifi password", "take a screenshot", "lock my pc", "cancel shutdown",
 
     # ---- dangerous (confirmation) ---------------------------------
