@@ -50,6 +50,36 @@ def test_press_strips_trailing_key_word(autogui):
     assert autogui.pressed("enter")
 
 
+@pytest.mark.parametrize("text, key", [
+    ("press the enter key", "enter"),
+    ("press the escape key", "esc"),
+    ("press the f5 key", "f5"),
+])
+def test_press_ignores_a_leading_article(autogui, text, key):
+    assert typing.handle(text) == "Done."
+    assert autogui.pressed(key)
+
+
+@pytest.mark.parametrize("text, key", [
+    ("press page up", "pageup"),
+    ("press page down", "pagedown"),
+    ("press the up arrow", "up"),
+    ("press the left arrow", "left"),
+    ("press print screen", "printscreen"),
+    ("press space bar", "space"),
+])
+def test_multi_word_key_names_are_reachable(autogui, text, key):
+    # Splitting the phrase on spaces turned these into nonsense combos
+    # ("page up" tried to press a key called "page").
+    assert typing.handle(text) == "Done."
+    assert autogui.pressed(key)
+
+
+def test_press_the_key_names_no_key_at_all(autogui):
+    assert typing.handle("press the key") is None
+    assert autogui.calls == []
+
+
 def test_press_a_combination(autogui):
     assert typing.handle("press control alt") == "Done."
     assert autogui.hotkeyed("ctrl", "alt")
