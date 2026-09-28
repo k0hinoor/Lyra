@@ -33,6 +33,13 @@ except Exception:
 
 IS_WINDOWS = __import__("sys").platform.startswith("win")
 
+# "open storage settings" and "open battery settings" contain words this
+# skill knows ("storage", "battery"), but they are not questions — they are
+# requests for a Windows Settings page, which the apps skill owns. Without
+# this guard the user gets a disk-space report instead of the page.
+_OPENS_SOMETHING = re.compile(r"^(?:open|launch|start|run|visit|go to)\b")
+_WANTS_SETTINGS = re.compile(r"\bsettings\b")
+
 
 # ------------------------------------------------------------
 # HELPERS
@@ -143,6 +150,11 @@ def handle(text, raw=None):
     if not text:
         return None
 
+    # Opening apps / folders / settings pages belongs to the apps and web
+    # skills, however many words below happen to match this one.
+    if _OPENS_SOMETHING.match(text) or _WANTS_SETTINGS.search(text):
+        return None
+
     # --------------------------------------------------------
     # TIME
     # --------------------------------------------------------
@@ -195,7 +207,9 @@ def handle(text, raw=None):
     if re.match(
         r"^(?:how is my (?:pc|computer|system)|system status|pc status|"
         r"cpu (?:usage)?|ram (?:usage)?|memory usage|performance|"
-        r"cpu and ram(?: usage)?|system usage)$",
+        r"cpu and ram(?: usage)?|system usage|"
+        r"how much (?:ram|memory|cpu)(?: usage)?"
+        r"(?: am i using| do i have| is in use| is being used)?)$",
         text,
     ):
         if not _PSUTIL_OK:

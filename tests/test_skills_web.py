@@ -45,10 +45,20 @@ def test_search_does_not_hijack_known_sites(opened):
     ("search for lofi beats on youtube", "lofi beats"),
     ("find lofi beats on youtube", "lofi beats"),
     ("youtube lofi beats", "lofi beats"),
+    # "search youtube for ..." used to fall through to the Google branch
+    # and search the wrong site entirely.
+    ("search youtube for lofi beats", "lofi beats"),
+    ("search on youtube for lofi beats", "lofi beats"),
+    ("look up youtube for lofi beats", "lofi beats"),
 ])
 def test_youtube_search(opened, text, query):
     assert web.handle(text) == f"Searching YouTube for {query}."
     assert opened == ["https://www.youtube.com/results?search_query=" + quote(query)]
+
+
+def test_youtube_without_a_query_is_not_a_search(opened):
+    assert web.handle("search youtube") is None
+    assert opened == []
 
 
 # ------------------------------------------------------------
@@ -110,13 +120,19 @@ def test_weather_uses_the_default_city(monkeypatch):
     assert cities == [config.DEFAULT_CITY]
 
 
-# Note: "what's the weather in tokyo" (with "the") does not match yet —
-# the weather pattern only allows "what is weather ...".
 @pytest.mark.parametrize("text, city", [
     ("weather in paris", "paris"),
     ("weather for new york", "new york"),
     ("what is weather in tokyo", "tokyo"),
     ("weather in tokyo today", "tokyo"),
+    # the natural spoken phrasings — the article "the" used to stop the
+    # match, so "what's the weather" was answered by the LLM instead
+    ("what's the weather", config.DEFAULT_CITY),
+    ("what's the weather like", config.DEFAULT_CITY),
+    ("how's the weather outside", config.DEFAULT_CITY),
+    ("what's the weather in tokyo", "tokyo"),
+    ("what's the weather like in tokyo", "tokyo"),
+    ("what is the weather in new york today", "new york"),
 ])
 def test_weather_extracts_the_city(monkeypatch, text, city):
     cities = []
@@ -124,6 +140,16 @@ def test_weather_extracts_the_city(monkeypatch, text, city):
 
     assert web.handle(text) == "sunny"
     assert cities == [city]
+
+
+@pytest.mark.parametrize("text", [
+    "the weather is nice today",
+    "is it going to rain",
+    "how are you",
+])
+def test_a_sentence_about_the_weather_is_not_a_question_about_it(opened, text):
+    assert web.handle(text) is None
+    assert opened == []
 
 
 def test_weather_parses_the_wttr_payload(monkeypatch):

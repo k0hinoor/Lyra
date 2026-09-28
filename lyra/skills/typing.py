@@ -24,7 +24,7 @@ except Exception:
 KEYS = {
     "enter": "enter", "return": "enter",
     "escape": "esc", "esc": "esc",
-    "tab": "tab", "space": "space", "spacebar": "space",
+    "tab": "tab", "space": "space", "spacebar": "space", "space bar": "space",
     "backspace": "backspace", "delete": "delete", "del": "delete",
     "up": "up", "up arrow": "up", "down": "down", "down arrow": "down",
     "left": "left", "left arrow": "left", "right": "right", "right arrow": "right",
@@ -38,6 +38,47 @@ KEYS = {
 
 for i in range(1, 13):
     KEYS[f"f{i}"] = f"f{i}"
+
+# Multi-word names in KEYS ("page up", "up arrow", "print screen") need
+# longest-first matching, so remember how many words the longest name has.
+_LONGEST_KEY_NAME = max(len(name.split()) for name in KEYS)
+
+_LEADING_ARTICLE = re.compile(r"^(?:the|a)\s+")
+_TRAILING_KEY_NOUN = re.compile(r"\s+(?:key|button)$")
+
+
+def _parse_keys(phrase):
+    """
+    "the page up key" -> (["pageup"], None)
+    "control alt"     -> (["ctrl", "alt"], None)
+    "ctrl c"          -> (None, "c")      single letters are shortcuts, not keys
+
+    Multi-word names in KEYS ("page up", "up arrow", "print screen") are
+    only reachable with longest-first matching — splitting the phrase on
+    spaces turned them into nonsense combinations. Nothing is pressed
+    until the whole phrase is understood.
+    """
+
+    words = phrase.split()
+    keys = []
+    index = 0
+
+    while index < len(words):
+
+        for span in range(min(_LONGEST_KEY_NAME, len(words) - index), 0, -1):
+
+            key = KEYS.get(" ".join(words[index:index + span]))
+
+            if key is not None:
+                keys.append(key)
+                index += span
+                break
+
+        else:
+            return None, words[index]
+
+    return keys, None
+
 
 SHORTCUTS = {
     "copy": ("ctrl", "c"),
@@ -99,16 +140,16 @@ def handle(text, raw=None):
             return "Key control needs the pyautogui package."
 
         phrase = match.group(1).strip()
-        phrase = re.sub(r"\s+(key|button)$", "", phrase)
+        phrase = _LEADING_ARTICLE.sub("", phrase)
+        phrase = _TRAILING_KEY_NOUN.sub("", phrase)
 
-        combo = []
-        for part in phrase.split():
-            key = KEYS.get(part)
+        if phrase in ("", "key", "button"):
+            return None                 # "press the key" names no key at all
 
-            if key is None:
-                return f"I don't know the {part} key."
+        combo, unknown = _parse_keys(phrase)
 
-            combo.append(key)
+        if unknown is not None:
+            return f"I don't know the {unknown} key."
 
         if not combo:
             return None

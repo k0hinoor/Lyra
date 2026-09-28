@@ -46,6 +46,17 @@ def test_search_routes_to_web(pc):
     assert reply == "Searching for best laptops."
 
 
+@pytest.mark.parametrize("text, target, reply", [
+    ("open storage settings", "ms-settings:storagesense", "Opening Storage Settings."),
+    ("open battery settings", "ms-settings:batterysaver", "Opening Battery Settings."),
+])
+def test_open_settings_page_is_not_swallowed_by_an_earlier_skill(pc, text, target, reply):
+    # Regression: "open storage settings" reached the system skill first,
+    # which matched the word "storage" and read out free disk space.
+    assert route(text) == (reply, None)
+    assert pc.started == [target]
+
+
 def test_shortcut_routes_to_typing_before_windows(pc):
     reply, confirmation = route("copy")
     assert reply == "Done."
