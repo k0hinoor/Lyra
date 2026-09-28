@@ -107,6 +107,14 @@ class Voice:
             print("Loading Lyra's voice...")
 
             self.piper = PiperVoice.load(str(model_path))
+
+            # Not every Piper voice is 22.05 kHz. Asking the loaded pack for
+            # its rate keeps a 16 kHz voice from being played back too fast.
+            self.sample_rate = int(
+                getattr(getattr(self.piper, "config", None), "sample_rate", 0)
+                or self.sample_rate
+            )
+
             self.ok = True
 
             print("Lyra's voice loaded.")
@@ -120,14 +128,21 @@ class Voice:
     # --------------------------------------------------------
 
     def _synthesize(self, text):
-        """text -> int16 PCM bytes at self.sample_rate ('' if empty)."""
+        """
+        text -> (sample_rate, int16 PCM bytes).
+
+        The rate is the one the synthesized audio is really in, which is
+        the only safe thing to open the output stream with. Returns
+        (0, b"") for text that cleans away to nothing.
+        """
 
         text = clean_for_voice(text)
 
         if not text:
-            return b""
+            return 0, b""
 
         chunks = []
+        rate = 0
 
         for chunk in self.piper.synthesize(text):
 
@@ -136,23 +151,22 @@ class Voice:
             if pcm is None:
                 pcm = getattr(chunk, "audio", b"")
 
-            rate = getattr(chunk, "sample_rate", None)
-
-            if rate:
-                self.sample_rate = rate
+            rate = getattr(chunk, "sample_rate", None) or rate
 
             chunks.append(pcm)
 
-        return b"".join(chunks)
+        return (rate or self.sample_rate), b"".join(chunks)
 
     # --------------------------------------------------------
     # PLAY HELPERS
     # --------------------------------------------------------
 
-    def _silence(self):
+    def _silence(self, sample_rate=None):
         """A short PCM silence for a natural pause between sentences."""
 
-        return b"\x00\x00" * int(self.sample_rate * config.VOICE_SENTENCE_SILENCE)
+        rate = sample_rate or self.sample_rate
+
+        return b"\x00\x00" * int(rate * config.VOICE_SENTENCE_SILENCE)
 
     def beep(self):
         """Short two-tone attention beep."""
@@ -219,10 +233,10 @@ class Voice:
                     if not sentence:
                         continue
 
-                    pcm = self._synthesize(sentence)
+                    rate, pcm = self._synthesize(sentence)
 
                     if pcm:
-                        synth_queue.put(pcm)
+                        synth_queue.put((rate, pcm))
 
             except Exception as e:
                 print(f"Voice synth error: {e}")
@@ -236,31 +250,41 @@ class Voice:
         # ----------------------------------------------------
         # CONSUMER: gapless playback through one stream
         # ----------------------------------------------------
+        # The stream is opened on the first chunk, at that chunk's real
+        # rate: the producer is already running, so opening it up front
+        # could pick a rate before the voice pack has had its say.
 
         stream = None
+        rate = self.sample_rate
 
         try:
-            stream = sd.OutputStream(
-                samplerate=self.sample_rate,
-                channels=1,
-                dtype="int16",
-                device=config.OUTPUT_DEVICE,
-            )
-            stream.start()
 
             while True:
 
-                pcm = synth_queue.get()
+                item = synth_queue.get()
 
-                if pcm is None:
+                if item is None:
                     break
+
+                chunk_rate, pcm = item
+
+                if stream is None:
+                    rate = chunk_rate or rate
+                    stream = sd.OutputStream(
+                        samplerate=rate,
+                        channels=1,
+                        dtype="int16",
+                        device=config.OUTPUT_DEVICE,
+                    )
+                    stream.start()
 
                 stream.write(pcm)
 
                 if config.VOICE_SENTENCE_SILENCE > 0:
-                    stream.write(self._silence())
+                    stream.write(self._silence(rate))
 
-            stream.stop()
+            if stream is not None:
+                stream.stop()
 
         except Exception as e:
             print(f"Voice playback error: {e}")
