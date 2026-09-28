@@ -26,6 +26,63 @@ def normalize(text):
 
 
 # ------------------------------------------------------------
+# POLITE FILLER
+# ------------------------------------------------------------
+# People talk to an assistant, they don't type commands:
+#   "can you please turn up the volume" -> "turn up the volume"
+# The skills only know the bare verb, so the padding comes off
+# here, once, before anything tries to match the command.
+
+_LEADING_FILLER = (
+    "i want you to", "i need you to", "i would like you to", "i'd like you to",
+    "id like you to", "i want to", "i need to", "can you please",
+    "could you please", "would you please", "will you please",
+    "can you", "could you", "would you", "will you", "do you", "are you",
+    "please", "kindly", "just", "right now", "now", "hey", "ok", "okay",
+    "yo", "hi", "hello", "um", "uh", "er", "erm", "hmm",
+)
+
+_TRAILING_FILLER = (
+    "right now", "now", "please", "for me", "okay", "ok", "thanks",
+    "thank you",
+)
+
+
+def strip_politeness(text):
+    """
+    Peel conversational padding off both ends of a command.
+
+    Never returns an empty string — text that is nothing but filler
+    ("please") is handed back untouched for the brain to answer.
+    """
+
+    if not text:
+        return text
+
+    original = text
+    stripped = text
+    changed = True
+
+    while changed and stripped:
+
+        changed = False
+
+        for filler in _LEADING_FILLER:
+            if stripped.startswith(filler + " "):
+                stripped = stripped[len(filler) + 1:].strip()
+                changed = True
+                break
+        else:
+            for filler in _TRAILING_FILLER:
+                if stripped.endswith(" " + filler):
+                    stripped = stripped[: -(len(filler) + 1)].strip()
+                    changed = True
+                    break
+
+    return stripped or original
+
+
+# ------------------------------------------------------------
 # CORRECT LYRA NAME IN TRANSCRIPTION
 # ------------------------------------------------------------
 

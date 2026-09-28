@@ -19,6 +19,7 @@ from lyra.utils import (
     is_thanks,
     normalize,
     split_sentences,
+    strip_politeness,
     strip_wake_word,
 )
 
@@ -42,6 +43,52 @@ def test_normalize(raw, expected):
 def test_normalize_collapses_punctuation_into_spaces():
     assert " " not in normalize("hello...world!!").replace("hello world", "")
     assert normalize("hello...world!!") == "hello world"
+
+
+# ------------------------------------------------------------
+# POLITE FILLER
+# ------------------------------------------------------------
+# Nobody talks to Lyra like a terminal. "can you please turn up
+# the volume" has to reach the skill as "turn up the volume".
+
+@pytest.mark.parametrize("raw, expected", [
+    ("please open notepad", "open notepad"),
+    ("can you open notepad", "open notepad"),
+    ("could you please open notepad", "open notepad"),
+    ("would you open notepad", "open notepad"),
+    ("i want you to open notepad", "open notepad"),
+    ("i need you to open notepad", "open notepad"),
+    ("kindly open notepad", "open notepad"),
+    ("just open notepad", "open notepad"),
+    ("hey open notepad", "open notepad"),
+    ("open notepad please", "open notepad"),
+    ("open notepad for me", "open notepad"),
+    ("open notepad now", "open notepad"),
+    ("open notepad thanks", "open notepad"),
+    ("please can you open notepad please", "open notepad"),
+    ("can you please can you open notepad", "open notepad"),
+    ("can you increase the volume", "increase the volume"),
+    ("turn up the volume a bit please", "turn up the volume a bit"),
+])
+def test_polite_padding_is_peeled_off(raw, expected):
+    assert strip_politeness(raw) == expected
+
+
+def test_a_command_is_left_alone():
+    assert strip_politeness("set volume to 40") == "set volume to 40"
+    assert strip_politeness("what time is it") == "what time is it"
+
+
+def test_text_that_is_only_politeness_survives():
+    assert strip_politeness("please") == "please"
+    assert strip_politeness("ok") == "ok"
+    assert strip_politeness("") == ""
+
+
+def test_normalize_and_strip_compose():
+    assert strip_politeness(normalize("Can you please turn up the volume?!")) == (
+        "turn up the volume"
+    )
 
 
 # ------------------------------------------------------------

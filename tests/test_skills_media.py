@@ -6,6 +6,7 @@
 
 import pytest
 
+from lyra import config
 from lyra.skills import media
 
 
@@ -85,6 +86,188 @@ def test_volume_without_pycaw_reports_it(monkeypatch):
 
 
 # ------------------------------------------------------------
+# HOW PEOPLE ACTUALLY SAY IT
+# ------------------------------------------------------------
+# The original failure: Lyra answered "right-click the sound icon"
+# because the phrasing missed the skill and fell through to the brain.
+# Every line below has to EXECUTE, not be explained.
+
+@pytest.mark.parametrize("text", [
+    "please increase the volume",
+    "can you turn up the volume",
+    "could you turn up the volume please",
+    "turn up my volume",
+    "raise the volume a bit",
+    "make it louder",
+    "louder please",
+    "boost the volume",
+    "crank up the volume",
+    "turn the music up",
+    "turn it up",
+    "raise it",
+    "push the volume up",
+    "turn the volume all the way up",
+])
+def test_every_spoken_way_of_asking_for_louder_is_acted_on(volume, text):
+    volume["level"] = 30
+
+    reply = media.handle(text)
+
+    assert reply is not None, "must be executed, never handed to the brain"
+    assert volume["level"] > 30
+
+
+@pytest.mark.parametrize("text", [
+    "please turn down the volume",
+    "can you make it quieter",
+    "turn it down",
+    "lower it",
+    "turn the music down",
+    "reduce the volume",
+])
+def test_every_spoken_way_of_asking_for_quieter_is_acted_on(volume, text):
+    volume["level"] = 60
+
+    reply = media.handle(text)
+
+    assert reply is not None, "must be executed, never handed to the brain"
+    assert volume["level"] < 60
+
+
+@pytest.mark.parametrize("text", [
+    "it's too quiet",
+    "the sound is too low",
+    "volume is too low",
+    "i can't hear you",
+    "i can't hear anything",
+    "it's too loud",
+    "the sound is too loud",
+    "it's too dark",
+    "it's too bright",
+])
+def test_complaints_are_fixed_not_explained(volume, text):
+    volume["level"] = 40
+
+    assert media.handle(text) is not None
+
+
+@pytest.mark.parametrize("text, expected", [
+    ("set the volume to sixty", 60),
+    ("set the volume to forty five", 45),
+    ("volume to 80", 80),
+    ("increase the volume to 60", 60),
+    ("turn the volume up to a hundred", 100),
+    ("make volume 40", 40),
+    ("full volume", 100),
+    ("max volume", 100),
+    ("half volume", 50),
+])
+def test_absolute_targets(volume, text, expected):
+    assert media.handle(text) == f"Volume set to {expected} percent."
+    assert volume["level"] == expected
+
+
+@pytest.mark.parametrize("text, step", [
+    ("volume up a bit", 5),
+    ("turn the volume up slightly", 5),
+    ("turn the volume up a lot", 25),
+    ("turn it up by 5", 5),
+    ("volume up 20", 20),
+])
+def test_step_size_follows_the_request(volume, text, step):
+    volume["level"] = 40
+
+    assert media.handle(text) == f"Volume set to {40 + step} percent."
+
+
+@pytest.mark.parametrize("text", [
+    "what's the volume",
+    "how loud is it",
+    "volume level",
+    "check the volume",
+    "current volume",
+])
+def test_asking_about_the_volume_reads_it_out(volume, text):
+    volume["level"] = 33
+    assert media.handle(text) == "Volume is at 33 percent."
+    assert volume["level"] == 33, "asking must not change anything"
+
+
+@pytest.mark.parametrize("text", ["mute the sound", "silence the audio", "mute my speaker",
+                                  "turn off the sound"])
+def test_mute_phrasings(volume, text):
+    assert media.handle(text) == "Muted."
+    assert volume["muted"] is True
+
+
+def test_unmute_phrasings(volume, text="unmute the sound"):
+    assert media.handle(text) == "Unmuted."
+    assert volume["muted"] is False
+
+
+def test_turning_it_up_while_muted_also_unmutes(volume):
+    volume["level"] = 10
+    volume["muted"] = True
+
+    reply = media.handle("turn up the volume")
+
+    assert "Unmuted" in reply
+    assert volume["muted"] is False
+    assert volume["level"] == 20
+
+
+def test_volume_never_goes_past_the_configured_ceiling(volume, monkeypatch):
+    monkeypatch.setattr(config, "MAX_VOLUME", 70)
+    volume["level"] = 60
+
+    assert media.handle("set volume to 100") == (
+        "Volume set to 70 percent, that is the maximum."
+    )
+    assert volume["level"] == 70
+
+
+def test_volume_failures_are_reported(monkeypatch, volume):
+    def boom():
+        raise RuntimeError("no audio device")
+
+    monkeypatch.setattr(media, "_current_volume", boom)
+
+    assert media.handle("volume") == "I couldn't read the volume."
+    assert media.handle("volume up") == "I couldn't change the volume."
+
+
+# ------------------------------------------------------------
+# WHAT THE SKILL MUST NOT SWALLOW
+# ------------------------------------------------------------
+# A level command is a small, closed world. One word that does not
+# belong means the text belongs to another skill (or to the brain).
+
+@pytest.mark.parametrize("text", [
+    "scroll down the screen",
+    "zoom in",
+    "print screen",
+    "show desktop",
+    "play music",
+    "play music on spotify",
+    "open sound settings",
+    "open display settings",
+    "open my music folder",
+    "search for volume",
+    "the battery is too low",
+    "the room is too noisy",
+    "it's too late",
+    "silence the notification",
+    "why can't i hear the birds",
+    "what volume should i use",
+    "dark mode",
+    "power off",
+    "tell me a joke",
+])
+def test_other_commands_are_left_to_their_own_skill(volume, text):
+    assert media.handle(text) is None
+
+
+# ------------------------------------------------------------
 # BRIGHTNESS
 # ------------------------------------------------------------
 
@@ -146,3 +329,47 @@ def test_playback_keys(autogui, text, key, reply):
 @pytest.mark.parametrize("text", ["open notepad", "what time is it", ""])
 def test_other_commands_are_left_alone(autogui, volume, brightness, text):
     assert media.handle(text) is None
+
+
+# ------------------------------------------------------------
+# BRIGHTNESS, SPOKEN LIKE PEOPLE SPEAK
+# ------------------------------------------------------------
+
+@pytest.mark.parametrize("text, expected", [
+    ("make the screen brighter", 60),
+    ("increase the brightness", 60),
+    ("it's too dark", 60),
+    ("brightness up 20", 70),
+    ("turn the brightness down", 40),
+    ("it's too bright", 40),
+    ("dim the screen", 40),
+    ("set the brightness to eighty", 80),
+])
+def test_brightness_phrasings(brightness, text, expected):
+    brightness.level = 50
+
+    assert media.handle(text) == f"Brightness set to {expected} percent."
+    assert brightness.level == expected
+
+
+def test_brightness_can_be_asked_about(brightness):
+    brightness.level = 35
+    assert media.handle("how bright is the screen") == "Brightness is at 35 percent."
+
+
+# ------------------------------------------------------------
+# PLAYBACK
+# ------------------------------------------------------------
+
+@pytest.mark.parametrize("text, key, reply", [
+    ("play", "playpause", "Playing."),
+    ("play music", "playpause", "Playing."),
+    ("pause", "playpause", "Paused."),
+    ("stop the music", "playpause", "Paused."),
+    ("skip to the next song", "nexttrack", "Next track."),
+    ("next track", "nexttrack", "Next track."),
+    ("previous track", "prevtrack", "Previous track."),
+])
+def test_more_playback_keys(autogui, text, key, reply):
+    assert media.handle(text) == reply
+    assert autogui.pressed(key)

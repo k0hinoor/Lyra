@@ -17,7 +17,7 @@ from lyra.skills.base import Confirmation
 def test_joke_routes_to_fun(pc):
     reply, confirmation = route("tell me a joke")
 
-    assert reply in fun.JOKES
+    assert any(reply.startswith(joke) for joke in fun.JOKES)   # joke + why
     assert confirmation is None
 
 
@@ -152,7 +152,7 @@ def test_a_broken_skill_does_not_hide_later_skills(monkeypatch, pc):
     monkeypatch.setattr(typing, "handle", boom)
 
     reply, confirmation = route("tell me a joke")
-    assert reply in fun.JOKES
+    assert any(reply.startswith(joke) for joke in fun.JOKES)    # joke + why
 
 
 def test_router_is_quiet_about_skills_that_opt_out(monkeypatch, pc):
