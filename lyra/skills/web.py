@@ -102,7 +102,8 @@ def handle(text, raw=None):
     # --------------------------------------------------------
 
     match = re.match(
-        r"^(?:what(?:'s| is)? )?weather(?: (?:forecast|report|like|now|outside))?"
+        r"^(?:(?:what|how)(?:'s| is)? )?(?:the )?weather"
+        r"(?: (?:forecast|report|like|now|outside))?"
         r"(?: (?:in|for|at) (.+?))?(?: (?:today|right now|now))?$",
         text,
     )
@@ -125,6 +126,16 @@ def handle(text, raw=None):
     match = re.match(r"^(?:open )?youtube (.+)$", text)
 
     if match and match.group(1).strip() not in ("settings",):
+        query = match.group(1).strip()
+        _open("https://www.youtube.com/results?search_query=" + quote(query))
+        return f"Searching YouTube for {query}."
+
+    # "search youtube for lofi beats", "look up youtube for X"
+    match = re.match(
+        r"^(?:play|search|find|look up)(?: on)? youtube(?: for)? (.+)$", text
+    )
+
+    if match:
         query = match.group(1).strip()
         _open("https://www.youtube.com/results?search_query=" + quote(query))
         return f"Searching YouTube for {query}."
