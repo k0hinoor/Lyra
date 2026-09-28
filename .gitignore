@@ -11,3 +11,8 @@ models/
 memory.json
 voice.wav
 *.wav
+
+# tests
+.pytest_cache/
+.coverage
+htmlcov/

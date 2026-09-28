@@ -211,6 +211,36 @@ Everything is in **`lyra/config.py`**:
 | `SPEAK_BEEP` | `True` | attention beep on wake/sleep |
 | `DEFAULT_CITY` | `"Bhubaneswar"` | for `"weather"` without a city |
 
+##  Testing
+
+Lyra's logic is covered by a pytest suite that runs headless — on Linux CI and on
+Windows — with **no microphone, no speakers, no Ollama and no real key presses**:
+every hardware dependency (pyautogui, pyperclip, psutil, pycaw, brightness) is
+swapped for a fake in `tests/conftest.py`.
+
+```bat
+pip install -r requirements-dev.txt
+pytest                 :: the whole suite, about 1 second
+pytest -m manual -s    :: live keyboard check — opens a REAL Notepad and types
+```
+
+| What is covered | File |
+|---|---|
+| normalize, wake word, sentence splitter, voice cleanup | `tests/test_utils.py` |
+| persistent memory (add / dedupe / forget / context block) | `tests/test_memory.py` |
+| skill router: ordering, confirmations, error isolation | `tests/test_router.py` |
+| one file per skill — apps, web, media, system, typing, windows, fun | `tests/test_skills_*.py` |
+| Ollama streaming, prompt building, offline fallback | `tests/test_brain.py` |
+| session flow: memory commands, confirm/cancel, terminate | `tests/test_session.py` |
+| live keyboard check (opt-in, needs a real desktop) | `tests/manual/test_keyboard_live.py` |
+
+The old root-level `test_keyboard.py` live check moved to `tests/manual/` and is
+now `pytest -m manual` instead of a plain script.
+
+**CI** (`.github/workflows/tests.yml`) runs the suite on every push and pull
+request, on Ubuntu + Windows with Python 3.10 and 3.12, plus a byte-compile
+syntax check.
+
 ##  Troubleshooting
 
 - **"I can't reach my local brain"** → Ollama isn't running. Start Ollama, run `ollama pull phi4-mini:3.8b`.

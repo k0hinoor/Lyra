@@ -1,0 +1,15 @@
+# ============================================================
+# LYRA — DEVELOPMENT / TEST DEPENDENCIES
+# ============================================================
+# You do NOT need this to run Lyra. Install it only to run the
+# test suite:
+#
+#     pip install -r requirements-dev.txt
+#     pytest
+#
+# The suite fakes every hardware dependency (pyautogui, pyperclip,
+# psutil, pycaw, brightness...), so nothing heavy is pulled in here.
+# ============================================================
+
+pytest>=7.4
+requests
