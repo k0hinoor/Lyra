@@ -18,6 +18,7 @@
 import sys
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
 
 from lyra import config
@@ -64,7 +65,10 @@ class FakeStream:
         self.started = True
 
     def write(self, pcm):
-        self.writes.append(pcm)
+        # Mirror sounddevice's typed-buffer requirement for dtype="int16".
+        assert isinstance(pcm, np.ndarray)
+        assert pcm.dtype == np.int16
+        self.writes.append(pcm.copy())
 
     def stop(self):
         self.stopped = True
@@ -171,7 +175,10 @@ def test_playback_uses_the_rate_of_the_audio_written(pack):
 
     stream = device.streams[0]
     assert stream.sample_rate == 16000
-    assert stream.writes[0] == b"\x11\x22" * 40
+    np.testing.assert_array_equal(
+        stream.writes[0], np.frombuffer(b"\x11\x22" * 40, dtype=np.int16)
+    )
+    assert stream.writes[0].dtype == np.int16
     assert stream.started and stream.stopped and stream.closed
 
 
@@ -207,8 +214,12 @@ def test_a_pause_is_written_between_sentences(pack):
 
     voice.speak_stream(iter(["One sentence.", "Another sentence."]))
 
-    silence = b"\x00\x00" * int(16000 * config.VOICE_SENTENCE_SILENCE)
-    assert device.streams[0].writes == [b"\x11\x22" * 40, silence] * 2
+    speech = np.frombuffer(b"\x11\x22" * 40, dtype=np.int16)
+    silence = np.zeros(int(16000 * config.VOICE_SENTENCE_SILENCE), dtype=np.int16)
+    writes = device.streams[0].writes
+    assert len(writes) == 4
+    for actual, expected in zip(writes, [speech, silence, speech, silence]):
+        np.testing.assert_array_equal(actual, expected)
 
 
 def test_one_stream_for_the_whole_reply(pack):
@@ -261,6 +272,29 @@ def test_the_beep_uses_the_loaded_rate(pack):
     assert device.played[0]["samplerate"] == 16000
     assert device.played[0]["device"] == config.OUTPUT_DEVICE
     assert device.waited
+
+
+def test_multiple_responses_reuse_piper_and_close_each_stream(pack):
+    voice, piper_voice, device = pack()
+
+    voice.speak("First response.")
+    voice.speak("Second response.")
+
+    assert piper_voice.spoken == ["First response.", "Second response."]
+    assert len(device.streams) == 2
+    assert all(stream.closed and stream.stopped for stream in device.streams)
+
+
+def test_pcm_validation_rejects_odd_byte_count(pack):
+    voice, _piper, _device = pack()
+    with pytest.raises(ValueError, match="even byte count"):
+        voice._pcm_to_int16(bytes([0]))
+
+
+def test_pcm_validation_rejects_unexpected_dtype(pack):
+    voice, _piper, _device = pack()
+    with pytest.raises(TypeError, match="must be int16"):
+        voice._pcm_to_int16(np.zeros(4, dtype=np.float32))
 
 
 def test_stop_silences_playback(pack):

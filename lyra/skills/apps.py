@@ -6,6 +6,7 @@
 ============================================================
 """
 
+import os
 import re
 import subprocess
 
@@ -115,12 +116,15 @@ _CLOSE_RE = re.compile(
 
 
 def _start(target):
-    subprocess.Popen(
-        f'start "" "{target}"',
-        shell=True,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
+    """Delegate one target to Windows shell activation without shell parsing."""
+    if os.name == "nt":
+        os.startfile(target)
+    else:
+        # This is a single executable/target argument, never a shell command.
+        subprocess.Popen(
+            [target], shell=False,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
 
 
 def _pretty(name):

@@ -8,8 +8,12 @@
 """
 
 import json
+import logging
+import shutil
 
 from . import config
+
+log = logging.getLogger(__name__)
 
 MAX_MEMORY_ITEMS = 40        # how many items get sent to the brain
 
@@ -27,6 +31,12 @@ class Memory:
     def _load(self):
 
         try:
+            config.MEMORY_FILE.parent.mkdir(parents=True, exist_ok=True)
+            if not config.MEMORY_FILE.exists():
+                legacy = config.BASE_DIR / "memory.json"
+                if legacy.exists() and legacy.resolve() != config.MEMORY_FILE.resolve():
+                    shutil.copy2(legacy, config.MEMORY_FILE)
+                    log.info("Migrated legacy memory file to %s", config.MEMORY_FILE)
             with open(config.MEMORY_FILE, "r", encoding="utf-8") as f:
                 data = json.load(f)
 
@@ -36,8 +46,8 @@ class Memory:
         except FileNotFoundError:
             self.items = []
 
-        except Exception as e:
-            print(f"Memory load error: {e}")
+        except Exception:
+            log.exception("Memory file could not be loaded")
             self.items = []
 
     def _save(self):
@@ -46,8 +56,8 @@ class Memory:
             with open(config.MEMORY_FILE, "w", encoding="utf-8") as f:
                 json.dump(self.items, f, indent=2, ensure_ascii=False)
 
-        except Exception as e:
-            print(f"Memory save error: {e}")
+        except Exception:
+            log.exception("Memory file could not be saved")
 
     # --------------------------------------------------------
     # OPERATIONS

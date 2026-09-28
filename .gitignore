@@ -6,6 +6,9 @@ venv/
 
 # models & downloaded packs (kept out of git on purpose)
 models/
+data/
+config/settings.json
+
 
 # personal / generated files
 memory.json

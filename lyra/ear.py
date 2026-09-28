@@ -11,9 +11,13 @@
 ============================================================
 """
 
+import logging
+
 import numpy as np
 
 from . import config
+
+log = logging.getLogger(__name__)
 
 
 class Ear:
@@ -51,8 +55,8 @@ class Ear:
                 convert_rate=16000,
                 convert_width=2
             )
-        except Exception as e:
-            print(f"Audio read error: {e}")
+        except Exception:
+            log.exception("Could not read microphone audio")
             return ""
 
         audio_array = np.frombuffer(raw, dtype=np.int16)
@@ -82,6 +86,6 @@ class Ear:
 
             return text.strip()
 
-        except Exception as e:
-            print(f"Transcribe error: {e}")
+        except Exception:
+            log.exception("Whisper transcription failed")
             return ""

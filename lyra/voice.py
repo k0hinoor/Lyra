@@ -12,6 +12,7 @@
 ============================================================
 """
 
+import logging
 import queue
 import threading
 
@@ -20,6 +21,8 @@ import requests
 
 from . import config
 from .utils import clean_for_voice, split_sentences
+
+log = logging.getLogger(__name__)
 
 try:
     import sounddevice as sd
@@ -94,6 +97,10 @@ class Voice:
 
         self.ok = False
         self.sample_rate = 22050
+        self._play_lock = threading.RLock()
+        self._active_stream = None
+        self._speaking_event = threading.Event()
+        self._stop_event = threading.Event()
 
         if not _SD_OK:
             print("sounddevice not available — running silent.")
@@ -119,8 +126,8 @@ class Voice:
 
             print("Lyra's voice loaded.")
 
-        except Exception as e:
-            print(f"Voice load error: {e}")
+        except Exception:
+            log.exception("Piper voice load failed")
             print("Lyra will run without speech.")
 
     # --------------------------------------------------------
@@ -145,21 +152,72 @@ class Voice:
         rate = 0
 
         for chunk in self.piper.synthesize(text):
+            sample_rate = int(getattr(chunk, "sample_rate", 0) or 0)
+            if sample_rate <= 0:
+                raise ValueError(f"Piper returned invalid sample rate: {sample_rate}")
+            if rate and sample_rate != rate:
+                raise ValueError(f"Piper changed sample rate mid-utterance: {rate} -> {sample_rate}")
+            rate = sample_rate
 
             pcm = getattr(chunk, "audio_int16_bytes", None)
+            if pcm is not None:
+                if not isinstance(pcm, (bytes, bytearray, memoryview)):
+                    raise TypeError(
+                        "Piper audio_int16_bytes must be bytes-like; received "
+                        f"{type(pcm).__name__}"
+                    )
+                raw = bytes(pcm)
+            else:
+                pcm = getattr(chunk, "audio", None)
+                audio = self._pcm_to_int16(pcm, context="Piper audio chunk")
+                raw = audio.tobytes()
 
-            if pcm is None:
-                pcm = getattr(chunk, "audio", b"")
-
-            rate = getattr(chunk, "sample_rate", None) or rate
-
-            chunks.append(pcm)
+            if len(raw) == 0 or len(raw) % 2:
+                raise ValueError(f"Piper returned invalid 16-bit PCM buffer ({len(raw)} bytes)")
+            log.debug(
+                "Piper chunk type=%s sample_rate=%d sample_width=2 pcm_bytes=%d",
+                type(chunk).__name__, sample_rate, len(raw),
+            )
+            chunks.append(raw)
 
         return (rate or self.sample_rate), b"".join(chunks)
 
     # --------------------------------------------------------
     # PLAY HELPERS
     # --------------------------------------------------------
+
+    @staticmethod
+    def _pcm_to_int16(pcm, context="audio"):
+        """Validate raw 16-bit PCM and expose it as a sounddevice array."""
+
+        if isinstance(pcm, np.ndarray):
+            if pcm.dtype != np.int16:
+                raise TypeError(
+                    f"{context} must be int16; received NumPy dtype {pcm.dtype}"
+                )
+            if not pcm.flags.c_contiguous:
+                pcm = np.ascontiguousarray(pcm)
+            return pcm
+
+        if not isinstance(pcm, (bytes, bytearray, memoryview)):
+            raise TypeError(
+                f"{context} must be PCM bytes or a NumPy int16 array; "
+                f"received {type(pcm).__name__}"
+            )
+
+        pcm_bytes = memoryview(pcm)
+        if pcm_bytes.nbytes % np.dtype(np.int16).itemsize:
+            raise ValueError(
+                f"{context} has {pcm_bytes.nbytes} bytes; 16-bit PCM must "
+                "have an even byte count"
+            )
+
+        # Piper audio_int16_bytes contains signed 16-bit PCM. frombuffer
+        # views those samples without copying the full synthesized buffer.
+        audio = np.frombuffer(pcm_bytes, dtype=np.int16)
+        if audio.dtype != np.int16:  # Defensive contract check for playback.
+            raise TypeError(f"{context} conversion produced {audio.dtype}, expected int16")
+        return audio
 
     def _silence(self, sample_rate=None):
         """A short PCM silence for a natural pause between sentences."""
@@ -168,9 +226,20 @@ class Voice:
 
         return b"\x00\x00" * int(rate * config.VOICE_SENTENCE_SILENCE)
 
-    def beep(self):
-        """Short two-tone attention beep."""
+    @property
+    def is_speaking(self):
+        return self._speaking_event.is_set()
 
+    def beep(self):
+        """Play the attention tone without overlapping speech playback."""
+        with self._play_lock:
+            self._speaking_event.set()
+            try:
+                return self._beep_locked()
+            finally:
+                self._speaking_event.clear()
+
+    def _beep_locked(self):
         if not self.ok:
             return
 
@@ -188,8 +257,8 @@ class Voice:
         try:
             sd.play(pcm, samplerate=sr, device=config.OUTPUT_DEVICE)
             sd.wait()
-        except Exception as e:
-            print(f"Beep error: {e}")
+        except Exception:
+            log.exception("Attention beep playback failed")
 
     # --------------------------------------------------------
     # SPEAK
@@ -204,11 +273,17 @@ class Voice:
         self.speak_stream(iter(split_sentences(text)))
 
     def speak_stream(self, sentences):
-        """
-        Consume an iterator/generator of sentence strings and
-        speak them pipelined: while one sentence is playing,
-        the next is already being synthesized.
-        """
+        """Serialize all speech through the single loaded voice/device."""
+        with self._play_lock:
+            self._speaking_event.set()
+            try:
+                return self._speak_stream_locked(sentences)
+            finally:
+                self._speaking_event.clear()
+
+    def _speak_stream_locked(self, sentences):
+        """Synthesize ahead while playing through one output stream."""
+        self._stop_event.clear()
 
         if not self.ok:
             # silent mode — just print
@@ -217,7 +292,9 @@ class Voice:
                     print("Lyra:", sentence)
             return
 
-        synth_queue = queue.Queue(maxsize=8)
+        # Replies are bounded by LYRA's output token limit; an unbounded queue
+        # avoids a producer deadlock if device playback aborts mid-reply.
+        synth_queue = queue.Queue()
 
         # ----------------------------------------------------
         # PRODUCER: synthesize ahead into the queue
@@ -238,8 +315,8 @@ class Voice:
                     if pcm:
                         synth_queue.put((rate, pcm))
 
-            except Exception as e:
-                print(f"Voice synth error: {e}")
+            except Exception:
+                log.exception("Piper synthesis failed")
 
             finally:
                 synth_queue.put(None)
@@ -259,48 +336,85 @@ class Voice:
 
         try:
 
-            while True:
+            while not self._stop_event.is_set():
 
                 item = synth_queue.get()
 
-                if item is None:
+                if item is None or self._stop_event.is_set():
                     break
 
                 chunk_rate, pcm = item
+                pcm_array = self._pcm_to_int16(pcm, context="Piper audio")
+                chunk_rate = int(chunk_rate or rate)
+                if chunk_rate <= 0:
+                    raise ValueError(f"Invalid Piper sample rate: {chunk_rate}")
 
                 if stream is None:
                     rate = chunk_rate or rate
+                    if rate <= 0:
+                        raise ValueError(f"Invalid playback sample rate: {rate}")
+                    if hasattr(sd, "check_output_settings"):
+                        sd.check_output_settings(
+                            device=config.OUTPUT_DEVICE, channels=1,
+                            dtype="int16", samplerate=rate,
+                        )
+                    log.debug(
+                        "Opening output device=%r sample_rate=%d channels=1 dtype=int16",
+                        config.OUTPUT_DEVICE, rate,
+                    )
                     stream = sd.OutputStream(
                         samplerate=rate,
                         channels=1,
                         dtype="int16",
                         device=config.OUTPUT_DEVICE,
                     )
+                    self._active_stream = stream
                     stream.start()
 
-                stream.write(pcm)
+                if self._stop_event.is_set():
+                    break
+
+                # Piper's audio_int16_bytes is raw PCM; output streams require
+                # a typed int16 array (the root cause of bytesNNN vs int16).
+                if chunk_rate != rate:
+                    raise ValueError(
+                        f"Piper chunk rate {chunk_rate} changed within a reply "
+                        f"(stream rate {rate})"
+                    )
+                stream.write(pcm_array)
 
                 if config.VOICE_SENTENCE_SILENCE > 0:
-                    stream.write(self._silence(rate))
+                    silence = self._silence(rate)
+                    stream.write(self._pcm_to_int16(silence, context="sentence silence"))
 
-            if stream is not None:
-                stream.stop()
-
-        except Exception as e:
-            print(f"Voice playback error: {e}")
+        except Exception:
+            log.exception("Piper/sounddevice playback failed")
 
         finally:
             if stream is not None:
                 try:
-                    stream.close()
+                    stream.stop()
                 except Exception:
                     pass
+                try:
+                    stream.close()
+                except Exception as close_error:
+                    print(f"Voice stream close error: {close_error}")
+                finally:
+                    self._active_stream = None
 
     def stop(self):
-        """Cut off current playback immediately."""
-
+        """Abort active stream or simple playback without waiting on speak()."""
+        self._stop_event.set()
+        stream = self._active_stream
+        if stream is not None:
+            abort = getattr(stream, "abort", None)
+            try:
+                (abort or stream.stop)()
+            except Exception as error:
+                print(f"Voice stop error: {error}")
         if _SD_OK:
             try:
                 sd.stop()
-            except Exception:
-                pass
+            except Exception as error:
+                print(f"Audio device stop error: {error}")
