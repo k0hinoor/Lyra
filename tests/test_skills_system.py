@@ -88,7 +88,25 @@ def test_system_status_without_psutil(monkeypatch):
     assert "psutil" in system.handle("how is my pc")
 
 
-@pytest.mark.parametrize("text", ["disk space", "how much storage do I have"])
+@pytest.mark.parametrize("text", [
+    "how much ram am i using",
+    "how much memory am i using",
+    "how much cpu am i using",
+    "how much ram do i have",
+])
+def test_system_status_understands_the_question_phrasing(psutil_stub, text):
+    psutil_stub.cpu = 12.4
+    psutil_stub.ram = 45.6
+
+    assert system.handle(text) == "CPU is at 12 percent, memory at 46 percent."
+
+
+@pytest.mark.parametrize("text", [
+    "disk space",
+    "how much storage do I have",
+    "how much storage is left",
+    "how much disk space do i have",
+])
 def test_disk_space(psutil_stub, text):
     psutil_stub.disk_free_gb = 120
     psutil_stub.disk_total_gb = 512
@@ -271,4 +289,22 @@ def test_power_commands_off_windows_are_refused(monkeypatch, shell):
 
 @pytest.mark.parametrize("text", ["open notepad", "tell me a joke", "close chrome", ""])
 def test_other_commands_are_left_alone(text):
+    assert system.handle(text) is None
+
+
+# ------------------------------------------------------------
+# SETTINGS PAGES BELONG TO THE APPS SKILL
+# ------------------------------------------------------------
+# Regression: "open storage settings" contains the word "storage" and
+# "open battery settings" contains "battery", so this skill used to
+# answer with a disk-space / battery report instead of letting the
+# apps skill open the page the user asked for.
+
+@pytest.mark.parametrize("text", [
+    "open storage settings",
+    "open battery settings",
+    "open sound settings",
+    "storage settings",
+])
+def test_settings_requests_are_left_to_the_apps_skill(text):
     assert system.handle(text) is None
