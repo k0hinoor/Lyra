@@ -2,11 +2,20 @@
 ============================================================
  SKILL: MEDIA
 ============================================================
- Volume, mute, brightness and media playback keys.
+ Volume, brightness and media playback keys.
+
+ Speech is not terminal input. "can you please turn the volume
+ up a bit", "it is way too quiet", "set volume to sixty" and
+ "turn it up to sixty" all reach the same skill, but as
+ different words. Each one is reduced to (subject, action,
+ amount) and then EXECUTED — Lyra does the job instead of
+ reciting where the button lives.
 ============================================================
 """
 
 import re
+
+from .. import config
 
 try:
     import pyautogui
@@ -33,6 +42,405 @@ try:
     _AUDIO_OK = True
 except Exception:
     pass
+
+
+_NO_PYCAW = "Volume control needs the pycaw package."
+_NO_BRIGHTNESS = "Brightness control needs the screen-brightness-control package."
+
+DEFAULT_STEP = 10           # "volume up" with no number moves ten points
+SMALL_STEP = 5              # "... a bit"
+BIG_STEP = 25               # "... a lot"
+
+
+# ------------------------------------------------------------
+# COMMAND VOCABULARY
+# ------------------------------------------------------------
+
+# Words that say WHAT is being controlled.
+_SUBJECTS = {
+    "volume": "volume", "vol": "volume", "sound": "volume", "audio": "volume",
+    "speaker": "volume", "speakers": "volume", "playback": "volume",
+    "music": "volume", "loudness": "volume", "loud": "volume",
+    "quiet": "volume",
+    "brightness": "brightness", "bright": "brightness", "dark": "brightness",
+    "dim": "brightness", "screen": "brightness", "display": "brightness",
+    "monitor": "brightness", "backlight": "brightness",
+}
+
+# "louder" is a subject AND a direction — it names the thing and the change.
+_COMPARATIVES = {
+    "louder": ("volume", 1), "quieter": ("volume", -1), "softer": ("volume", -1),
+    "brighter": ("brightness", 1), "darker": ("brightness", -1),
+    "dimmer": ("brightness", -1),
+}
+
+# Words that survive a "battery is too low" style complaint but carry no
+# subject of their own.
+_TOPIC_ONLY = {
+    "loud": "volume", "quiet": "volume",
+    "bright": "brightness", "dark": "brightness", "dim": "brightness",
+}
+
+_UP_WORDS = {
+    "up", "louder", "higher", "increase", "increased", "increasing",
+    "raise", "raised", "boost", "bumped", "bump", "amplify", "crank",
+}
+
+_DOWN_WORDS = {
+    "down", "quieter", "lower", "lowered", "decrease", "decreased",
+    "decreasing", "reduce", "reduced", "softer", "drop", "less", "dim",
+}
+
+# Verbs that make a bare "up"/"down" a real command.
+_CONTROL_VERBS = {
+    "turn", "turned", "turning", "make", "made", "set", "put", "change",
+    "adjust", "move", "crank", "push", "bring", "go", "bump", "boost",
+    "raise", "raised", "increase", "increased", "lower", "lowered",
+    "decrease", "decreased", "reduce", "reduced", "drop", "keep", "try",
+    "get", "give", "take",
+}
+
+# Verbs that mean "set an absolute level", not "move by a step".
+_ABSOLUTE_VERBS = {"set", "put", "make", "change", "adjust", "move"}
+
+# Everything a legitimate level command may contain. One unknown word
+# (e.g. "scroll" in "scroll down the screen") means it is not ours.
+_ALLOWED = (
+    _CONTROL_VERBS
+    | _UP_WORDS
+    | _DOWN_WORDS
+    | set(_SUBJECTS)
+    | set(_COMPARATIVES)
+    | set(_TOPIC_ONLY)
+    | {
+        "to", "at", "by", "a", "bit", "little", "slightly", "lot", "way",
+        "much", "some", "step", "steps", "percent", "pct", "off", "all",
+        "mute", "unmute", "silent", "silence", "shush",
+        "low", "high", "what", "whats", "how", "much", "check", "current",
+        "tell", "exactly",
+    }
+)
+
+# A command that names no knob at all: "turn it up", "raise it", "louder".
+# Only honoured when a verb is there too, so a stray "up" isn't a command.
+_PRONOUN_OK = _CONTROL_VERBS | _UP_WORDS | _DOWN_WORDS | {"it", "that", "this"}
+
+# Never treat these as an action, whatever else the sentence looks like.
+_QUESTION_WORDS = {"why", "how", "what", "whats", "where", "when", "who", "which", "explain"}
+
+# Words allowed when the command is only a question about the current level.
+_READ_OK = {
+    "level", "levels", "status", "how", "what", "whats", "howmuch",
+    "current", "now", "check", "tell", "is", "are", "right", "again",
+    "exactly", "at", "much",
+}
+
+# Complaints, checked on the raw words — "too" is dropped as filler later.
+_TOO_QUIET = re.compile(
+    r"\btoo (?:quiet|low|soft|small|faint|dark|dim)\b"
+    r"|\b(?:cant|can ?not|cannot|unable ?to) hear\b"
+    r"|\bnot (?:hearing|loud enough|hearing anything)\b"
+    r"|\bno (?:sound|audio)\b"
+    r"|\b(?:barely|hardly) (?:hear|audible)\b"
+)
+
+_TOO_LOUD = re.compile(
+    r"\btoo (?:loud|noisy|high|sharp|strong|bright)\b"
+    r"|\b(?:blasting|deafening|ear ?splitting)\b"
+    r"|\btoo much\b"
+)
+
+# "I can't hear you" — no knob named, but the meaning is unmistakable.
+_CANNOT_HEAR = re.compile(
+    r"\b(?:cant|can ?not|cannot|unable ?to) hear\b|\bnot hearing (?:you|anything)\b"
+)
+
+# Spoken numbers -> digits.
+_UNITS = {
+    "zero": 0, "one": 1, "two": 2, "three": 3, "four": 4, "five": 5,
+    "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10, "eleven": 11,
+    "twelve": 12, "thirteen": 13, "fourteen": 14, "fifteen": 15,
+    "sixteen": 16, "seventeen": 17, "eighteen": 18, "nineteen": 19,
+}
+
+_TENS = {
+    "twenty": 20, "thirty": 30, "forty": 40, "fifty": 50, "sixty": 60,
+    "seventy": 70, "eighty": 80, "ninety": 90,
+}
+
+_NAMED_LEVELS = {
+    "half": 50, "full": 100, "max": 100, "maximum": 100, "min": 0,
+    "minimum": 0, "muted": 0, "hundred": 100,
+}
+
+# Conversational filler — none of it changes what the user wants.
+_FILLER = {
+    "a", "an", "the", "my", "me", "mine", "i", "we", "us", "our", "its",
+    "it", "this", "that", "these", "those", "there", "here", "to", "for",
+    "of", "on", "in", "at", "by", "from", "with", "into", "is", "are",
+    "am", "be", "been", "being", "do", "does", "did", "have", "has",
+    "please", "pls", "can", "could", "would", "will", "shall", "should",
+    "may", "might", "must", "you", "u", "your", "yours", "lyra", "hey",
+    "hi", "hello", "ok", "okay", "just", "kindly", "now", "right", "well",
+    "so", "then", "also", "too", "very", "really", "actually", "quite",
+    "um", "uh", "er", "erm", "hmm", "all", "some", "thing", "stuff",
+    "computer", "pc", "system", "device", "percent", "pct", "level",
+    "levels", "status", "i'd", "id", "im", "ive", "lets", "let", "gonna",
+    "wanna", "like", "need", "want", "would've", "could've",
+}
+
+_SMALL_WORDS = {"bit", "little", "slightly", "small"}
+_BIG_WORDS = {"lot", "way", "much", "loads", "heaps"}
+
+
+# ------------------------------------------------------------
+# SPEECH -> (subject, action, amount)
+# ------------------------------------------------------------
+
+def _words(text):
+    """Lowercase word list, apostrophes removed ("it's" -> "its")."""
+
+    cleaned = text.lower().replace("’", "").replace("'", "")
+    return [w for w in re.split(r"[^a-z0-9]+", cleaned) if w]
+
+
+def _subject_of(words):
+    """
+    Which knob is the user talking about, and any direction a
+    comparative adjective carries. None means "not a level command".
+    """
+
+    subject = None
+    direction = 0
+
+    for word in words:
+
+        if subject is None:
+            subject = _SUBJECTS.get(word) or _TOPIC_ONLY.get(word)
+
+        if not direction and word in _COMPARATIVES:
+            subject = _COMPARATIVES[word][0]
+            direction = _COMPARATIVES[word][1]
+
+    return subject, direction
+
+
+def _names_a_knob(words):
+    """True when the text mentions volume or brightness at all."""
+
+    return any(
+        word in _SUBJECTS or word in _TOPIC_ONLY or word in _COMPARATIVES
+        for word in words
+    )
+
+
+def _spelled_out_numbers(words):
+    """Turn spoken numbers into digit strings: "twenty five" -> "25"."""
+
+    out = []
+    i = 0
+
+    while i < len(words):
+
+        word = words[i]
+
+        if word in _NAMED_LEVELS:
+            out.append(str(_NAMED_LEVELS[word]))
+            i += 1
+            continue
+
+        if word in _TENS:
+            nxt = words[i + 1] if i + 1 < len(words) else None
+            if nxt in _UNITS:
+                out.append(str(_TENS[word] + _UNITS[nxt]))
+                i += 2
+                continue
+            out.append(str(_TENS[word]))
+            i += 1
+            continue
+
+        if word in _UNITS:
+            out.append(str(_UNITS[word]))
+            i += 1
+            continue
+
+        out.append(word)
+        i += 1
+
+    return out
+
+
+def _content(words):
+    """Filler-free command words, numbers already as digits."""
+
+    return [w for w in _spelled_out_numbers(words) if w not in _FILLER]
+
+
+def _is_known(words):
+    """False when an unfamiliar word is present — the text isn't ours."""
+
+    return all(w in _ALLOWED or w.isdigit() for w in words)
+
+
+def _step_of(words, default):
+    """How far to move: an explicit number, or 'a bit' / 'a lot'."""
+
+    for word in words:
+        if word.isdigit():
+            return int(word)
+
+    if any(w in _SMALL_WORDS for w in words):
+        return SMALL_STEP
+
+    if any(w in _BIG_WORDS for w in words):
+        return BIG_STEP
+
+    return default
+
+
+def _target_of(words, named_level=False):
+    """
+    The absolute level asked for, or None.
+
+    "set volume to 50", "volume to fifty", "turn the volume up to 60",
+    "make volume 40" and "full volume" all name a destination;
+    "turn it up by 5" does not. Run this on the words BEFORE filler
+    is dropped, because the destination marker is the word "to".
+    """
+
+    for index, word in enumerate(words):
+
+        if word not in ("to", "at"):
+            continue
+
+        for later in words[index + 1:]:
+            if later in _FILLER:
+                continue
+            if later.isdigit():
+                return int(later)
+            break
+
+    if named_level:
+        for word in words:
+            if word.isdigit():
+                return int(word)
+
+    if any(w in _ABSOLUTE_VERBS for w in words):
+        for word in words:
+            if word.isdigit():
+                return int(word)
+
+    return None
+
+
+def _level_command(text):
+    """
+    Returns (subject, action, amount) or None.
+
+      subject  "volume" | "brightness"
+      action   "read" | "up" | "down" | "set" | "mute" | "unmute"
+      amount   step for "up"/"down", absolute level for "set"
+    """
+
+    words = _words(text)
+
+    if not words:
+        return None
+
+    content = _content(words)
+    spoken = _spelled_out_numbers(words)     # filler still in, numbers as digits
+    is_question = bool(set(words) & _QUESTION_WORDS)
+
+    # ---- mute / unmute with no knob named at all: "mute." -------
+    # Naming a knob is what keeps "silence the notification" and
+    # "the battery is too low" away from the volume control.
+
+    if not _names_a_knob(words):
+
+        if not is_question:
+
+            if "unmute" in content:
+                return "volume", "unmute", None
+
+            if set(content) <= {"mute", "silent", "silence", "shush"}:
+                return "volume", "mute", None
+
+            if _CANNOT_HEAR.search(" ".join(words)):
+                return "volume", "up", _step_of(content, DEFAULT_STEP)
+
+            # "turn it up", "raise it" — a verb with a direction and
+            # no knob named still means the sound.
+            if (
+                all(w in _PRONOUN_OK or w.isdigit() for w in content)
+                and set(content) & _CONTROL_VERBS
+                and set(content) & (_UP_WORDS | _DOWN_WORDS)
+            ):
+                action = "up" if set(content) & _UP_WORDS else "down"
+                return "volume", action, _step_of(content, DEFAULT_STEP)
+
+        return None
+
+    subject, comparative = _subject_of(words)
+
+    if subject is None:
+        return None                       # nothing that sounds like a knob
+
+    if not _is_known(content):
+        return None                       # "scroll down the screen", "open sound"
+
+    # ---- mute / unmute -----------------------------------------
+
+    if "unmute" in content:
+        return subject, "unmute", None
+
+    if any(w in ("mute", "silent", "silence") for w in content):
+        return subject, "mute", None
+
+    if subject == "volume" and "off" in content and (
+        {"turn", "turning", "turned", "switch", "shut"} & set(content)
+    ):
+        return subject, "mute", None
+
+    # ---- absolute level ----------------------------------------
+
+    named_level = any(w in _NAMED_LEVELS for w in words)
+    target = _target_of(spoken, named_level)
+
+    if target is not None:
+        return subject, "set", target
+
+    # ---- direction ---------------------------------------------
+
+    direction = 0
+
+    for word in content:
+        if word in _UP_WORDS:
+            direction = 1
+            break
+        if word in _DOWN_WORDS:
+            direction = -1
+            break
+
+    if not direction:
+        direction = comparative
+
+    if not direction:
+        spoken = " ".join(words)
+        if _TOO_QUIET.search(spoken):
+            direction = 1
+        elif _TOO_LOUD.search(spoken):
+            direction = -1
+
+    if direction:
+        action = "up" if direction > 0 else "down"
+        return subject, action, _step_of(content, DEFAULT_STEP)
+
+    # ---- just asking what it is right now ----------------------
+
+    if all(w in _READ_OK or w in _SUBJECTS or w in _TOPIC_ONLY for w in content):
+        return subject, "read", None
+
+    return None
 
 
 # ------------------------------------------------------------
@@ -66,12 +474,127 @@ def _set_volume(percent):
     return percent
 
 
+def _is_muted():
+    try:
+        return bool(_volume_interface().GetMute())
+    except Exception:
+        return False
+
+
+def _set_muted(muted):
+    _volume_interface().SetMute(1 if muted else 0, None)
+
+
+def _clamp(value, ceiling):
+    return max(0, min(int(value), int(ceiling)))
+
+
+# ------------------------------------------------------------
+# EXECUTE
+# ------------------------------------------------------------
+
+def _run_volume(action, amount):
+
+    if not _AUDIO_OK:
+        return _NO_PYCAW
+
+    try:
+
+        if action == "read":
+            return f"Volume is at {_current_volume()} percent."
+
+        if action == "mute":
+            _set_muted(True)
+            return "Muted."
+
+        if action == "unmute":
+            _set_muted(False)
+            return "Unmuted."
+
+        ceiling = config.MAX_VOLUME
+
+        if action == "set":
+            wanted = amount
+            level = _set_volume(_clamp(amount, ceiling))
+        else:
+            wanted = None
+            current = _current_volume()
+            level = _set_volume(
+                _clamp(current + amount if action == "up" else current - amount,
+                       ceiling)
+            )
+
+    except Exception as e:
+        print(f"Volume error: {e}")
+        return (
+            "I couldn't read the volume."
+            if action == "read"
+            else "I couldn't change the volume."
+        )
+
+    if action == "up" and _is_muted():
+        # raising a muted volume is a no-op — say it out loud instead of failing
+        try:
+            _set_muted(False)
+        except Exception as e:
+            print(f"Unmute error: {e}")
+            return f"Volume is muted, volume set to {level} percent."
+        return f"Unmuted, volume set to {level} percent."
+
+    if wanted is not None and wanted > ceiling:
+        return f"Volume set to {level} percent, that is the maximum."
+
+    return f"Volume set to {level} percent."
+
+
+def _run_brightness(action, amount):
+
+    if not _BRIGHTNESS_OK:
+        return _NO_BRIGHTNESS
+
+    ceiling = config.MAX_BRIGHTNESS
+
+    try:
+
+        if action == "read":
+            return f"Brightness is at {sbc.get_brightness()[0]} percent."
+
+        if action == "set":
+            wanted = amount
+            level = _clamp(amount, ceiling)
+        else:
+            wanted = None
+            current = sbc.get_brightness()[0]
+            level = _clamp(
+                current + amount if action == "up" else current - amount,
+                ceiling,
+            )
+
+        sbc.set_brightness(level)
+
+    except Exception as e:
+        print(f"Brightness error: {e}")
+        return (
+            "I couldn't read the brightness."
+            if action == "read"
+            else "I couldn't change the brightness."
+        )
+
+    if wanted is not None and wanted > ceiling:
+        return f"Brightness set to {level} percent, that is the maximum."
+
+    return f"Brightness set to {level} percent."
+
+
 # ------------------------------------------------------------
 # MEDIA KEYS
 # ------------------------------------------------------------
 
 def _press_media(key):
     pyautogui.press(key)
+
+
+_MEDIA_NOUN = r"(?:music|song|songs|video|media|track|tracks|playback|playlist|audio)"
 
 
 # ------------------------------------------------------------
@@ -86,107 +609,18 @@ def handle(text, raw=None):
         return None
 
     # --------------------------------------------------------
-    # VOLUME
+    # VOLUME / BRIGHTNESS  (executed, never explained)
     # --------------------------------------------------------
 
-    if text == "volume":
-        if not _AUDIO_OK:
-            return "Volume control needs the pycaw package."
-        return f"Volume is at {_current_volume()} percent."
+    command = _level_command(text)
 
-    match = re.match(r"^set volume to (\d{1,3})(?: percent)?$", text)
+    if command is not None:
+        subject, action, amount = command
 
-    if match:
-        if not _AUDIO_OK:
-            return "Volume control needs the pycaw package."
-        level = _set_volume(match.group(1))
-        return f"Volume set to {level} percent."
+        if subject == "volume":
+            return _run_volume(action, amount)
 
-    match = re.match(
-        r"^(?:turn |the |turn the )?volume (up|down|louder|quieter)"
-        r"(?: (?:by )?(\d{1,3}))?$",
-        text,
-    )
-
-    if match:
-        step = int(match.group(2) or 10)
-        going_up = match.group(1) in ("up", "louder")
-    else:
-        match = re.match(
-            r"^(increase|raise|decrease|reduce|lower) (?:the )?volume"
-            r"(?: (?:by )?(\d{1,3}))?$",
-            text,
-        )
-
-        if match:
-            step = int(match.group(2) or 10)
-            going_up = match.group(1) in ("increase", "raise")
-
-    if match:
-        if not _AUDIO_OK:
-            return "Volume control needs the pycaw package."
-
-        current = _current_volume()
-        level = _set_volume(current + step if going_up else current - step)
-
-        return f"Volume set to {level} percent."
-
-    match = re.match(r"^(?:volume )?(mute|unmute)$", text)
-
-    if match:
-        if not _AUDIO_OK:
-            return "Volume control needs the pycaw package."
-
-        volume = _volume_interface()
-        muting = match.group(1) == "mute"
-        volume.SetMute(1 if muting else 0, None)
-
-        return "Muted." if muting else "Unmuted."
-
-    if text in ("volume mute", "mute volume"):
-        if not _AUDIO_OK:
-            return "Volume control needs the pycaw package."
-        _volume_interface().SetMute(1, None)
-        return "Muted."
-
-    # --------------------------------------------------------
-    # BRIGHTNESS
-    # --------------------------------------------------------
-
-    if text == "brightness":
-        if not _BRIGHTNESS_OK:
-            return "Brightness control needs the screen-brightness-control package."
-        try:
-            return f"Brightness is at {sbc.get_brightness()[0]} percent."
-        except Exception:
-            return "I couldn't read the brightness."
-
-    match = re.match(r"^set brightness to (\d{1,3})(?: percent)?$", text)
-
-    if match:
-        if not _BRIGHTNESS_OK:
-            return "Brightness control needs the screen-brightness-control package."
-        try:
-            level = max(0, min(100, int(match.group(1))))
-            sbc.set_brightness(level)
-            return f"Brightness set to {level} percent."
-        except Exception:
-            return "I couldn't change the brightness."
-
-    match = re.match(r"^brightness (?:up|down)(?: (?:by )?(\d{1,3}))?$", text)
-
-    if match:
-        if not _BRIGHTNESS_OK:
-            return "Brightness control needs the screen-brightness-control package."
-        try:
-            step = int(match.group(1) or 10)
-            current = sbc.get_brightness()[0]
-            level = current + step if "up" in text else current - step
-            level = max(0, min(100, level))
-            sbc.set_brightness(level)
-            return f"Brightness set to {level} percent."
-        except Exception:
-            return "I couldn't change the brightness."
+        return _run_brightness(action, amount)
 
     # --------------------------------------------------------
     # PLAYBACK KEYS
@@ -195,19 +629,25 @@ def handle(text, raw=None):
     if not _PYAUTOGUI_OK:
         return None
 
-    if re.match(r"^(?:play|resume)(?: (?:some |the )?(?:music|song|songs|video|media|track))?$", text):
+    lowered = text.lower()
+    optional = rf"(?: (?:some |the |this |my )?{_MEDIA_NOUN})?"
+    required = rf"(?: (?:some |the |this |my )?{_MEDIA_NOUN})"
+
+    if re.match(rf"^(?:play|resume|start){optional}$", lowered):
         _press_media("playpause")
         return "Playing."
 
-    if re.match(r"^pause(?: (?:the |some )?(?:music|song|songs|video|media|track))?$", text):
+    if re.match(rf"^pause{optional}$", lowered) \
+            or re.match(rf"^(?:stop|halt){required}$", lowered):
         _press_media("playpause")
         return "Paused."
 
-    if re.match(r"^(?:next|skip)(?: (?:track|song|video|media))?$", text) or text == "next song please":
+    if re.match(r"^(?:next|skip)(?: (?:the |this )?(?:track|song|video|media))?$", lowered) \
+            or re.match(rf"^skip (?:to )?(?:the )?next{required}$", lowered):
         _press_media("nexttrack")
         return "Next track."
 
-    if re.match(r"^(?:previous|last)(?: (?:track|song|video|media))?$", text):
+    if re.match(r"^(?:previous|last)(?: (?:the )?(?:track|song|video|media))?$", lowered):
         _press_media("prevtrack")
         return "Previous track."
 

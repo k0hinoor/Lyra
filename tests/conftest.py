@@ -285,6 +285,9 @@ def volume(monkeypatch):
 
     class FakeEndpoint:
 
+        def GetMute(self):
+            return 1 if state["muted"] else 0
+
         def SetMute(self, value, _guid):
             state["muted"] = bool(value)
             state["calls"].append("mute" if value else "unmute")

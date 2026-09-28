@@ -94,3 +94,12 @@ CONFIRM_WORDS = ["confirm", "yes", "yeah", "do it", "proceed", "sure", "go ahead
 CANCEL_WORDS = ["cancel", "no", "nope", "stop", "abort", "do not", "dont", "nahi", "nahin", "nah"]
 
 SHUTDOWN_DELAY = 5            # seconds between confirmed shutdown and the actual shutdown
+
+# ------------------------------------------------------------
+# HEARING / SCREEN SAFETY
+# ------------------------------------------------------------
+# Volume and brightness never go past these, no matter what is
+# asked for. Drop MAX_VOLUME to 70 if the speakers are loud.
+
+MAX_VOLUME = 100
+MAX_BRIGHTNESS = 100

@@ -23,11 +23,48 @@ from lyra.skills import fun
     "joke",
 ])
 def test_joke_requests_are_handled(text):
-    assert fun.handle(text) in fun.JOKES
+    reply = fun.handle(text)                       # once: the joke is random
+    assert any(reply.startswith(joke) for joke in fun.JOKES)
 
 
 def test_joke_never_returns_an_unknown_question():
     assert fun.handle("what is the meaning of life") is None
+
+
+@pytest.mark.parametrize("text", ["another one", "one more", "one more joke"])
+def test_follow_up_jokes_are_handled(text):
+    reply = fun.handle(text)
+    assert any(reply.startswith(joke) for joke in fun.JOKES)
+
+
+# ------------------------------------------------------------
+# THE PUN GETS EXPLAINED
+# ------------------------------------------------------------
+# Spoken aloud nobody can look up what UDP is, so Lyra decodes the
+# pun herself instead of leaving a blank silence or a "huh?".
+
+def test_every_joke_carries_its_explanation():
+    assert set(fun.JOKES) == set(fun.EXPLANATIONS), (
+        "a joke was added without an explanation"
+    )
+
+
+def test_the_joke_is_answered_with_its_explanation(monkeypatch):
+    joke = fun.JOKES[5]
+    monkeypatch.setattr(fun.random, "choice", lambda items: joke)
+
+    assert fun.handle("tell me a joke") == f"{joke} {fun.EXPLANATIONS[joke]}"
+
+
+def test_explanations_are_plain_spoken_english(monkeypatch):
+    for joke, explanation in fun.EXPLANATIONS.items():
+        monkeypatch.setattr(fun.random, "choice", lambda items, j=joke: j)
+        reply = fun.handle("tell me a joke")
+
+        assert reply.startswith(joke)
+        assert reply[len(joke):].strip() == explanation
+        assert explanation.endswith(".")
+        assert not re.search(r"[_*`\[\]<>{}]", explanation), "not TTS friendly"
 
 
 # ------------------------------------------------------------

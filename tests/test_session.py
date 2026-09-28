@@ -53,6 +53,36 @@ def test_blank_input_does_nothing(session, fake_brain):
 
 
 # ------------------------------------------------------------
+# POLITE COMMANDS STILL REACH THE SKILL
+# ------------------------------------------------------------
+
+@pytest.mark.parametrize("said", [
+    "can you please turn up the volume",
+    "could you make it louder please",
+    "hey increase the volume a bit",
+    "i want you to turn the volume down",
+    "turn the volume up now please",
+])
+def test_polite_pc_commands_are_executed_not_asked_about(session, fake_brain, pc, said):
+    pc.volume["level"] = 40
+
+    session.process(said)
+
+    assert fake_brain.asked == [], "the brain must not answer with a how-to guide"
+    assert pc.volume["calls"], "the volume must actually have been changed"
+
+
+def test_a_complaint_is_fixed_instead_of_explained(session, fake_brain, pc, capfd):
+    pc.volume["level"] = 20
+
+    session.process("it's too quiet")
+
+    assert fake_brain.asked == []
+    assert pc.volume["level"] == 30
+    assert "right-click" not in capfd.readouterr().out.lower()
+
+
+# ------------------------------------------------------------
 # MEMORY
 # ------------------------------------------------------------
 

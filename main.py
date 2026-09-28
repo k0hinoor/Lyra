@@ -27,6 +27,7 @@ from lyra.utils import (
     is_terminate,
     is_thanks,
     normalize,
+    strip_politeness,
     strip_wake_word,
 )
 
@@ -176,7 +177,7 @@ class Session:
     def process(self, text, raw=None):
         """Process one already-wake-stripped command. Returns True to exit."""
 
-        normalized = normalize(text)
+        normalized = strip_politeness(normalize(text))
         raw = raw if raw is not None else text
 
         if not normalized:

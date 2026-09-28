@@ -20,11 +20,33 @@ The old `main.py` was only the brain. Now the whole body is built:
 | **Project** | one big file | modular: `lyra/` package (config, ear, voice, brain, memory, 7 skills) |
 | **Voice pack** | manual, not in repo | **auto-downloads on first run** (`en_US-amy-medium`, female) |
 | **PC control** | 3 commands | **100+ commands** across 7 skill modules |
+| **Understands speech** | exact command words only | "can you please turn up the volume", "it's too quiet", "set volume to sixty" — all **executed** |
 | **Response speed** | wait for full reply, then speak | **streams — speaks the first sentence while the rest generates** |
 | **Listening** | always-on, 1.5s pause lag | wake word "Hey Lyra" + 12s follow-up window, 0.7s pause |
 | **Transcription** | writes WAV to disk every time | transcribes straight from RAM, beam size 1 |
 | **Dangerous actions** | — | shutdown / restart / sleep / wipe memory **ask for confirmation** |
 | **Install** | manual | `install.bat` one-click + `run_lyra.bat` launcher |
+
+### She does it, she doesn't explain it
+
+Ask her to change something and she changes it. She never reads out a manual.
+
+```text
+You:  Can you please turn up the volume?
+Lyra: Volume set to 40 percent.          (not: "right-click the sound icon...")
+
+You:  It's too quiet in here.
+Lyra: Volume set to 50 percent.
+
+You:  Set the volume to sixty.
+Lyra: Volume set to 60 percent.
+```
+
+Polite padding (`please`, `can you`, `i want you to`, ...) is peeled off before a command is
+matched, spoken numbers become digits, and every phrasing — `turn up the volume`,
+`make it louder`, `crank up the music`, `crank it up`, `i can't hear you` — lands on the same
+control. If she genuinely cannot do something, she says so in one sentence instead of
+describing where the button is.
 
 ### Why it feels faster now
 
@@ -88,9 +110,22 @@ name Windows knows**. `"close chrome"`, `"close notepad"`, ...
 `"open github"`, `"open flipkart"`, `"open google dot com"`, and any `.com` domain.
 
 ### Media — volume, brightness, playback
-`"volume up/down"`, `"set volume to 40"`, `"mute"`, `"unmute"`, `"volume"`,
-`"brightness up/down"`, `"set brightness to 70"`, `"play/pause music"`, `"next track"`,
-`"previous track"`.
+Say it however you like — she does the rest:
+
+| Instead of | Say |
+|---|---|
+| `"volume up"`, `"turn the volume up"`, `"increase the volume"`, `"make it louder"`, `"crank up the music"`, `"louder please"` | volume **up** |
+| `"volume down"`, `"turn it down"`, `"make it quieter"`, `"lower the volume"` | volume **down** |
+| `"set volume to 40"`, `"volume to 40"`, `"set the volume to sixty"`, `"full volume"`, `"half volume"`, `"volume to the max"` | an exact level |
+| `"volume up a bit"` (+5), `"turn the volume up a lot"` (+25), `"turn it up by 5"` | a step |
+| `"it's too quiet"`, `"i can't hear you"`, `"it's too loud"`, `"too dark"` | a complaint, fixed at once |
+| `"mute"`, `"mute the sound"`, `"silence the audio"`, `"turn off the sound"`, `"unmute"` | mute / unmute |
+| `"volume"`, `"what's the volume"`, `"how loud is it"` | the current level, read out |
+| `"brightness up"`, `"make the screen brighter"`, `"it's too dark"`, `"set brightness to 70"` | brightness |
+| `"play/pause music"`, `"stop the music"`, `"next track"`, `"skip to the next song"`, `"previous track"` | playback |
+
+Turning it up while it is muted also unmutes it, and volume never goes past
+`MAX_VOLUME` in `lyra/config.py` (lower it to 70 if your speakers are loud).
 
 ### Windows & tabs
 `"minimize/maximize window"`, `"show desktop"`, `"switch window"`, `"task view"`,
@@ -115,7 +150,13 @@ name Windows knows**. `"close chrome"`, `"close notepad"`, ...
 `"forget everything"` (confirmed).
 
 ### Fun
-`"tell me a joke"`, `"flip a coin"`, `"roll a dice"`, `"pick a number between 1 and 100"`.
+`"tell me a joke"`, `"another one"`, `"flip a coin"`, `"roll a dice"`, `"pick a number between 1 and 100"`.
+
+The jokes are developer puns, so Lyra **decodes the pun after the punchline** — nobody can look
+up what UDP is while she's talking:
+
+> *"I would tell you a UDP joke, but you might not get it. UDP is a way of sending data over
+> the internet that never checks whether it arrived, so the joke could simply get lost on the way."*
 
 ### Anything else
 Goes to the local brain (phi4-mini via Ollama) with your memory + conversation context.
@@ -176,7 +217,7 @@ Lyra/
 ├── memory.json              ← your long-term memory (auto-created)
 └── lyra/
     ├── config.py            ← EVERY setting lives here — edit this, not code
-    ├── utils.py             ← normalize, wake-word matching, sentence streaming
+    ├── utils.py             ← normalize, polite-filler stripping, wake-word matching, sentence streaming
     ├── memory.py            ← persistent memory
     ├── brain.py             ← Ollama streaming client + persona prompt
     ├── ear.py               ← faster-whisper STT (from RAM, beam 1)
@@ -185,7 +226,7 @@ Lyra/
     └── skills/
         ├── apps.py          ← open/close apps, folders, settings pages
         ├── web.py           ← searches, websites, YouTube, Wikipedia, weather
-        ├── media.py         ← volume, brightness, playback keys
+        ├── media.py         ← volume, brightness, playback keys (understands speech, not keywords)
         ├── typing.py        ← dictated typing, keys, hotkeys, clipboard
         ├── windows.py       ← window/tab management
         ├── system.py        ← screenshots, battery, power, Wi-Fi, IP ...
@@ -209,6 +250,8 @@ Everything is in **`lyra/config.py`**:
 | `OLLAMA_MODEL` | `"phi4-mini:3.8b"` | any Ollama model works |
 | `PAUSE_THRESHOLD` | `0.7` | lower = snappier, higher = waits longer for slow speakers |
 | `SPEAK_BEEP` | `True` | attention beep on wake/sleep |
+| `MAX_VOLUME` | `100` | hard ceiling for `"turn up the volume"` — drop to `70` if the speakers are loud |
+| `MAX_BRIGHTNESS` | `100` | same, for the screen |
 | `DEFAULT_CITY` | `"Bhubaneswar"` | for `"weather"` without a city |
 
 ##  Testing

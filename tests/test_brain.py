@@ -73,6 +73,34 @@ def test_history_is_capped(brain):
 
 
 # ------------------------------------------------------------
+# OPERATE, DON'T INSTRUCT
+# ------------------------------------------------------------
+# The bug this guards: asked to turn the volume up, Lyra read out
+# a manual for Windows, macOS and phones instead of doing it.
+
+def test_the_prompt_forbids_answering_with_instructions(brain):
+    system_prompt = brain._messages("hello")[0]["content"].lower()
+
+    assert "never reply with instructions" in system_prompt
+    assert "you are not a manual" in system_prompt
+    assert "here is how you do it" in system_prompt
+
+
+def test_the_prompt_tells_the_brain_what_it_can_do(brain):
+    system_prompt = brain._messages("hello")[0]["content"].lower()
+
+    for capability in ("volume", "brightness", "clipboard", "windows"):
+        assert capability in system_prompt
+
+
+def test_the_prompt_stays_a_single_voice_friendly_block(brain):
+    system_prompt = brain._messages("hello")[0]["content"]
+
+    assert "no markdown" in system_prompt.lower()
+    assert "spoken out loud" in system_prompt.lower()
+
+
+# ------------------------------------------------------------
 # STREAMING
 # ------------------------------------------------------------
 
