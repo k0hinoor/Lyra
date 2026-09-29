@@ -362,7 +362,11 @@ def _level_command(text):
             if "unmute" in content:
                 return "volume", "unmute", None
 
-            if set(content) <= {"mute", "silent", "silence", "shush"}:
+            # `content and` matters: an utterance made only of filler
+            # ("hey lyra", "okay", "hmm", or Whisper hearing "you" in
+            # background noise) leaves `content` empty, and the empty set
+            # is a subset of every set, so it used to read as "mute".
+            if content and set(content) <= {"mute", "silent", "silence", "shush"}:
                 return "volume", "mute", None
 
             if _CANNOT_HEAR.search(" ".join(words)):
@@ -457,6 +461,16 @@ def _volume_interface():
         pass
 
     device = AudioUtilities.GetSpeakers()
+
+    # pycaw 20251023 and later wrap the speakers in an AudioDevice that
+    # has no Activate() of its own and exposes the endpoint volume as a
+    # property instead. Older releases return the raw IMMDevice, which
+    # has to be activated by hand. The class is checked (not the
+    # instance) so a real COM error inside the property is not mistaken
+    # for "old pycaw".
+    if hasattr(type(device), "EndpointVolume"):
+        return device.EndpointVolume
+
     interface = device.Activate(IAudioEndpointVolume._iid_, CLSCTX_ALL, None)
 
     return cast(interface, POINTER(IAudioEndpointVolume))

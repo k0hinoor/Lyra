@@ -11,6 +11,8 @@ from .schema import ActionPlan
 
 log = logging.getLogger(__name__)
 
+_KEYBOARD_ACTIONS = frozenset({"type_text", "press_key", "hotkey"})
+
 
 class Status(str, Enum):
     SUCCESS = "SUCCESS"
@@ -52,14 +54,25 @@ class ActionExecutor:
             raise TypeError("ActionExecutor accepts only validated ActionPlan objects")
         results = []
         generated_text = None
+        opened_app = None
         for action in plan.actions:
             if self._stop.is_set():
                 results.append(ActionResult(action, Status.STOPPED, "Task stopped safely"))
                 return TaskResult(Status.STOPPED, tuple(results))
             try:
                 kind = action["type"]
+                if kind in _KEYBOARD_ACTIONS and opened_app is not None:
+                    # Keystrokes go to whatever window is in front. After
+                    # opening an app, type only once that app is verified
+                    # to be in front (never into LYRA's own console).
+                    if not automation.focus_app_window(opened_app):
+                        raise RuntimeError(
+                            f"I couldn't bring the {opened_app} window to the front, "
+                            "so I didn't type anything"
+                        )
                 if kind == "open_app":
                     automation.open_app(action["app"])
+                    opened_app = action["app"]
                 elif kind == "generate_text":
                     if generate_text is None:
                         raise RuntimeError("Text generation callback is unavailable")

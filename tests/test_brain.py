@@ -232,3 +232,113 @@ def test_the_request_asks_for_a_stream(monkeypatch, brain):
     assert payload["keep_alive"] == config.OLLAMA_KEEP_ALIVE
     assert payload["options"]["num_predict"] == config.MAX_REPLY_TOKENS
     assert kwargs["stream"] is True
+
+
+# ------------------------------------------------------------
+# COMPUTER-TASK PLANNING
+# ------------------------------------------------------------
+
+from lyra.actions.schema import validate_plan  # noqa: E402
+
+
+def test_the_example_shown_to_the_model_is_a_valid_plan():
+    assert validate_plan(brain_module.PLAN_EXAMPLE).actions[0]["type"] == "open_app"
+
+
+def test_the_planner_prompt_spells_out_the_action_objects():
+    prompt = brain_module._planner_instruction("open notepad and write about india")
+    assert '{"type": "open_app", "app": APP_NAME}' in prompt
+    assert json.dumps(brain_module.PLAN_EXAMPLE) in prompt
+    assert prompt.endswith("Task: open notepad and write about india")
+
+
+def _plan_reply(content, status_code=200):
+    return FakeResponse(payload={"message": {"content": content}}, status_code=status_code)
+
+
+def test_plan_request_sends_the_schema_as_the_format(monkeypatch, brain):
+    sent = []
+
+    def post(url, json=None, **kwargs):
+        sent.append(json)
+        return _plan_reply(__import__("json").dumps(brain_module.PLAN_EXAMPLE))
+
+    monkeypatch.setattr(brain_module.requests, "post", post)
+    plan = brain.plan_actions("open notepad and write a poem")
+    assert plan is not None and len(plan.actions) == 3
+    assert isinstance(sent[0]["format"], dict)            # structured outputs
+    assert sent[0]["format"]["required"] == ["intent", "actions"]
+
+
+def test_old_ollama_without_schema_support_falls_back_to_json_mode(monkeypatch, brain):
+    formats = []
+
+    def post(url, json=None, **kwargs):
+        formats.append(json["format"] if isinstance(json["format"], str) else "schema")
+        if len(formats) == 1:
+            return _plan_reply("", status_code=400)
+        return _plan_reply(__import__("json").dumps(brain_module.PLAN_EXAMPLE))
+
+    monkeypatch.setattr(brain_module.requests, "post", post)
+    assert brain.plan_actions("open notepad and write a poem") is not None
+    assert formats == ["schema", "json"]
+
+
+def test_a_dialect_reply_is_recovered_into_a_plan(monkeypatch, brain):
+    reply = {"intent": "computer_task", "actions": [
+        "open_app(app=notepad)",
+        'generate_text(instruction="Write 20 words about India")',
+        "type_text(source=generated_text)",
+    ]}
+    monkeypatch.setattr(brain_module.requests, "post",
+                        lambda *a, **k: _plan_reply(json.dumps(reply)))
+    plan = brain.plan_actions("open notepad and write 20 words about india")
+    assert [a["type"] for a in plan.actions] == ["open_app", "generate_text", "type_text"]
+
+
+def test_a_rejected_plan_logs_what_the_model_said(monkeypatch, brain, caplog):
+    reply = '{"intent": "computer_task", "actions": [{"type": "run_command", "command": "whoami"}]}'
+    monkeypatch.setattr(brain_module.requests, "post", lambda *a, **k: _plan_reply(reply))
+    with caplog.at_level("WARNING"):
+        assert brain.plan_actions("do something odd") is None
+    assert "run_command" in caplog.text        # the raw reply is in the log
+
+
+# ------------------------------------------------------------
+# WRITING TEXT FOR A TASK
+# ------------------------------------------------------------
+
+def test_write_text_uses_the_writer_prompt_and_leaves_history_alone(monkeypatch, brain):
+    sent = []
+
+    def post(url, json=None, **kwargs):
+        sent.append(json)
+        return FakeResponse(payload={"message": {"content": "India is vast and varied."}})
+
+    monkeypatch.setattr(brain_module.requests, "post", post)
+    assert brain.write_text("Write 5 words about India") == "India is vast and varied."
+    assert sent[0]["messages"][0]["content"] == brain_module.WRITER_SYSTEM_PROMPT
+    assert sent[0]["stream"] is False
+    assert brain.history == []
+
+
+@pytest.mark.parametrize("raw, cleaned", [
+    ('"India is vast."', "India is vast."),
+    ("```\nIndia is vast.\n```", "India is vast."),
+    ("“India is vast.”", "India is vast."),
+    ('"Hi," she said. "Bye."', '"Hi," she said. "Bye."'),     # inner quotes: left alone
+    ("India's rivers are long.", "India's rivers are long."),
+])
+def test_written_text_loses_wrapping_but_keeps_its_own_quotes(raw, cleaned):
+    assert brain_module._clean_written_text(raw) == cleaned
+
+
+def test_write_text_raises_instead_of_returning_an_error_sentence(monkeypatch, brain):
+    monkeypatch.setattr(brain_module.requests, "post",
+                        lambda *a, **k: FakeResponse(payload={}, status_ok=False))
+    with pytest.raises(Exception):
+        brain.write_text("Write about India")
+    monkeypatch.setattr(brain_module.requests, "post",
+                        lambda *a, **k: FakeResponse(payload={"message": {"content": "  "}}))
+    with pytest.raises(RuntimeError):
+        brain.write_text("Write about India")

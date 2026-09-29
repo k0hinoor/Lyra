@@ -126,7 +126,9 @@ Install/configure GitHub CLI (`gh auth login`) before publishing. The updater in
 
 ## Structured actions, computer control, and screen API
 
-Existing deterministic skills remain in place. Multi-step desktop requests can be planned as a JSON list of allow-listed actions: open an approved app, generate text, type generated text, press a limited key, use a shortcut, move/click, scroll, or drag/drop. Python validates every field, action count, app name, coordinates, and operation before dispatch. Unknown actions and terminal apps requested through the LLM planner are rejected. There is no automatic arbitrary command, code, delete, shutdown, message, or email action.
+Existing deterministic skills remain in place. Multi-step desktop requests can be planned as a JSON list of allow-listed actions: open an approved app, generate text, type generated text, press a limited key, use a shortcut, move/click, scroll, or drag/drop. Python validates every field, action count, app name, key, coordinates, and operation before dispatch. Unknown actions and terminal apps requested through the LLM planner are rejected. There is no automatic arbitrary command, code, delete, shutdown, message, or email action.
+
+The planner sends Ollama a JSON Schema of the plan (structured outputs, Ollama 0.5+; older versions fall back to plain JSON mode), and `coerce_plan()` rewrites the formats small models commonly produce anyway, such as `"open_app(app=notepad)"` or `{"open_app": {...}}`, into the canonical shape. Coercion only restructures; the strict validator still decides. A rejected plan is logged together with the model's reply. Text to type is produced by a dedicated writing prompt, and an Ollama error aborts the task instead of being typed. Before any keyboard action in an app the plan opened, LYRA brings that app's window to the front and verifies it; if it cannot, nothing is typed.
 
 `ActionExecutor` returns `SUCCESS`, `FAILURE`, `UNKNOWN`, or `STOPPED`. Without an independent visual observer, successful input dispatch is reported as `UNKNOWN`, not claimed as verified. `capture_screen()` in `lyra/screen/capture.py` returns a `ScreenFrame`; `capture_screen(window_title="...")` uses optional window enumeration and crops the matching window.
 
@@ -165,6 +167,8 @@ The tests run without physical audio devices or Ollama. Hardware-dependent funct
 - **No/wrong speaker:** run `.venv\Scripts\python.exe main.py --devices`, set `OUTPUT_DEVICE` in `settings.json`, then restart.
 - **Piper playback error:** inspect `%APPDATA%\Lyra\logs\lyra.log`. Diagnostics include sample rate, chunk byte count, output device, and stack traces; playback requires signed 16-bit mono PCM.
 - **No microphone access:** Windows Settings → Privacy & security → Microphone → allow desktop apps.
+- **Volume commands fail:** LYRA supports both the current pycaw API (`AudioDevice.EndpointVolume`) and the older `Activate()` one; any other error is printed as `Volume error: ...` and logged.
+- **"I couldn't create a valid, safe action plan":** the `WARNING ... Rejected malformed computer-action plan` line in the console and `lyra.log` gives the reason and the model's reply.
 - **Updater offers no update:** only published stable GitHub Releases with a higher semantic version and both required archive/checksum assets are eligible.
 
 ## Project tree

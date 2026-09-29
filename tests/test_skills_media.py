@@ -373,3 +373,86 @@ def test_brightness_can_be_asked_about(brightness):
 def test_more_playback_keys(autogui, text, key, reply):
     assert media.handle(text) == reply
     assert autogui.pressed(key)
+
+
+# ------------------------------------------------------------
+# FILLER ALONE IS NOT A COMMAND  (it used to mean "mute")
+# ------------------------------------------------------------
+
+@pytest.mark.parametrize("text", [
+    "you", "okay", "ok", "hmm", "um", "so", "hello", "hi", "hey", "please",
+    "lyra", "hey lyra", "ok lyra", "right",
+])
+def test_filler_alone_never_mutes(text, volume):
+    assert media._level_command(text) is None
+    media.handle(text)
+    assert volume["calls"] == []
+    assert volume["muted"] is False
+
+
+def test_a_real_mute_still_mutes(volume):
+    media.handle("mute")
+    assert volume["muted"] is True
+
+
+# ------------------------------------------------------------
+# BOTH PYCAW API SHAPES
+# ------------------------------------------------------------
+
+@pytest.fixture
+def fake_pycaw(monkeypatch):
+    """Minimal comtypes/pycaw names so _volume_interface can run anywhere."""
+    import sys
+    import types
+
+    monkeypatch.setitem(sys.modules, "comtypes", types.SimpleNamespace(CoInitialize=lambda: None))
+    monkeypatch.setattr(media, "IAudioEndpointVolume",
+                        types.SimpleNamespace(_iid_="IID_IAudioEndpointVolume"), raising=False)
+    monkeypatch.setattr(media, "CLSCTX_ALL", 23, raising=False)
+    monkeypatch.setattr(media, "POINTER", lambda interface: ("POINTER", interface), raising=False)
+    monkeypatch.setattr(media, "cast", lambda obj, pointer: ("cast", obj), raising=False)
+
+    def use(device):
+        monkeypatch.setattr(media, "AudioUtilities",
+                            types.SimpleNamespace(GetSpeakers=lambda: device), raising=False)
+
+    return use
+
+
+def test_new_pycaw_audio_device_uses_its_endpoint_volume(fake_pycaw):
+    # pycaw 20251023+: GetSpeakers() returns an AudioDevice wrapper with an
+    # EndpointVolume property and NO Activate() ("'AudioDevice' object has
+    # no attribute 'Activate'" on the owner's PC).
+    endpoint = object()
+
+    class AudioDevice:
+        @property
+        def EndpointVolume(self):
+            return endpoint
+
+    fake_pycaw(AudioDevice())
+    assert media._volume_interface() is endpoint
+
+
+def test_old_pycaw_raw_device_is_activated(fake_pycaw):
+    activated = []
+
+    class IMMDevice:
+        def Activate(self, iid, context, params):
+            activated.append((iid, context, params))
+            return "interface"
+
+    fake_pycaw(IMMDevice())
+    assert media._volume_interface() == ("cast", "interface")
+    assert activated == [("IID_IAudioEndpointVolume", 23, None)]
+
+
+def test_a_com_error_inside_the_new_property_is_not_hidden(fake_pycaw):
+    class AudioDevice:
+        @property
+        def EndpointVolume(self):
+            raise OSError("no audio endpoint")
+
+    fake_pycaw(AudioDevice())
+    with pytest.raises(OSError):
+        media._volume_interface()

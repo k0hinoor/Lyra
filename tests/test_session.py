@@ -224,3 +224,46 @@ def test_session_is_wired_to_a_voice_when_given_one(session, fake_brain):
     voiced.process("tell me a joke")
 
     assert spoken
+
+
+# ------------------------------------------------------------
+# A WAKE PHRASE IS AN ADDRESS, NOT A COMMAND
+# ------------------------------------------------------------
+# Typing "hey lyra" in text mode (or saying it again while Lyra is already
+# awake) used to reach the skills, and the volume skill read it as "mute".
+
+@pytest.mark.parametrize("text", ["hey lyra", "Hey Lyra!", "lyra", "ok lyra", "hey laura"])
+def test_a_bare_wake_phrase_gets_an_acknowledgement(session, fake_brain, pc, text, capfd):
+    assert session.process(text) is False
+    assert "Yes?" in capfd.readouterr().out
+    assert fake_brain.asked == []
+    assert pc.volume["calls"] == []
+
+
+def test_a_command_after_the_wake_phrase_is_carried_out(session, fake_brain, capfd):
+    session.process("Hey Lyra, what time is it?")
+    assert "It's" in capfd.readouterr().out
+    assert fake_brain.asked == []
+
+
+def test_a_question_after_the_wake_phrase_reaches_the_brain_without_it(session, fake_brain):
+    session.process("hey lyra why is the sky blue")
+    assert fake_brain.asked == ["why is the sky blue"]
+
+
+def test_goodbye_with_the_name_still_ends_the_session(session):
+    assert session.process("lyra goodbye") is True
+
+
+@pytest.mark.parametrize("text", ["you", "okay", "hmm", "hello", "so"])
+def test_filler_heard_while_awake_never_mutes(session, pc, text):
+    session.process(text)
+    assert pc.volume["calls"] == []
+    assert pc.volume["muted"] is False
+
+
+def test_stop_after_the_wake_phrase_still_stops_an_active_task(session, capfd):
+    session.task_active = True
+    session.process("hey lyra stop")
+    assert session.task_executor.stop_requested
+    assert "Stopping" in capfd.readouterr().out

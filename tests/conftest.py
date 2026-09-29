@@ -188,10 +188,15 @@ class FakeRun:
 class FakeResponse:
     """Minimal `requests.Response` stand-in, streaming or not."""
 
-    def __init__(self, lines=(), payload=None, status_ok=True):
+    def __init__(self, lines=(), payload=None, status_ok=True, status_code=None):
         self._lines = list(lines)
         self._payload = payload
-        self._status_ok = status_ok
+        self.status_code = status_code if status_code is not None else (200 if status_ok else 500)
+        self._status_ok = status_ok and self.status_code < 400
+
+    @property
+    def ok(self):
+        return self._status_ok
 
     def __enter__(self):
         return self
@@ -360,6 +365,10 @@ def fake_brain():
         def ask_stream(self, text):
             self.asked.append(text)
             return iter([self.reply])
+
+        def write_text(self, instruction):
+            self.asked.append(instruction)
+            return self.reply
 
     return FakeBrain()
 
