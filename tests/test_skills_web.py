@@ -190,3 +190,165 @@ def test_weather_failure_is_spoken_not_raised(monkeypatch):
 def test_other_commands_are_left_alone(opened, text):
     assert web.handle(text) is None
     assert opened == []
+
+
+# ------------------------------------------------------------
+# "open youtube and search for lofi"  (one breath, two steps)
+# ------------------------------------------------------------
+
+def test_open_youtube_and_search(opened):
+    # The regex used to treat "and search for lofi" as the query.
+    assert web.handle("open youtube and search for lofi") == (
+        "Searching YouTube for lofi."
+    )
+    assert opened == ["https://www.youtube.com/results?search_query=lofi"]
+
+
+@pytest.mark.parametrize("text, query", [
+    ("youtube and search for lofi", "lofi"),
+    ("open youtube and play lofi beats", "lofi beats"),
+    ("open youtube and find lofi", "lofi"),
+])
+def test_more_youtube_and_search_phrasings(opened, text, query):
+    reply = web.handle(text)
+    assert reply == f"Searching YouTube for {query}."
+    assert opened == [
+        "https://www.youtube.com/results?search_query=" + quote(query)
+    ]
+
+
+# ------------------------------------------------------------
+# NAMED BROWSER  ("open youtube in brave")
+# ------------------------------------------------------------
+
+@pytest.mark.parametrize("text, browser, url, reply", [
+    ("open youtube in brave", "brave", "https://www.youtube.com",
+     "Opening Youtube in Brave."),
+    ("open gmail in chrome", "chrome", "https://mail.google.com",
+     "Opening Gmail in Chrome."),
+    ("open github in firefox", "firefox", "https://github.com",
+     "Opening Github in Firefox."),
+    ("open github in edge", "edge", "https://github.com",
+     "Opening Github in Edge."),
+    ("open youtube in google chrome", "chrome", "https://www.youtube.com",
+     "Opening Youtube in Chrome."),
+    ("open github in microsoft edge", "edge", "https://github.com",
+     "Opening Github in Edge."),
+])
+def test_open_site_in_named_browser(browser_launches, opened, text, browser, url, reply):
+    assert web.handle(text) == reply
+    assert browser_launches == [(browser, url)]
+    assert opened == [], "the default browser must not also fire"
+
+
+def test_search_youtube_in_named_browser(browser_launches, opened):
+    assert web.handle("search youtube for lofi in brave") == (
+        "Searching YouTube for lofi in Brave."
+    )
+    assert browser_launches == [
+        ("brave", "https://www.youtube.com/results?search_query=lofi")
+    ]
+
+
+def test_google_search_in_named_browser(browser_launches):
+    assert web.handle("search for best laptops in firefox") == (
+        "Searching for best laptops in Firefox."
+    )
+    assert browser_launches == [
+        ("firefox", "https://www.google.com/search?q=" + quote("best laptops"))
+    ]
+
+
+def test_missing_named_browser_falls_back_to_default(monkeypatch, opened):
+    from lyra import browsers
+
+    monkeypatch.setattr(browsers, "find_browser", lambda name: None)
+    monkeypatch.setattr(browsers, "launch_browser", lambda name, url=None: False)
+
+    assert web.handle("open youtube in brave") == (
+        "I couldn't find Brave, so I opened it in your default browser."
+    )
+    assert opened == ["https://www.youtube.com"]
+
+
+def test_a_site_name_in_a_browser_is_not_a_search_query(opened):
+    # Regression guard for the old behaviour: "open youtube in brave"
+    # searched YouTube for "in brave".
+    web.handle("open youtube in brave")
+    assert opened == [] or all("search_query" not in url for url in opened)
+
+
+# ------------------------------------------------------------
+# MULTI-STEP: "open brave and open youtube"
+# ------------------------------------------------------------
+
+@pytest.mark.parametrize("text, url, reply", [
+    ("open brave and open youtube", "https://www.youtube.com",
+     "Opening Youtube in Brave."),
+    ("open brave and go to youtube", "https://www.youtube.com",
+     "Opening Youtube in Brave."),
+    ("open brave and search youtube for lofi",
+     "https://www.youtube.com/results?search_query=lofi",
+     "Searching YouTube for lofi in Brave."),
+    ("open chrome and open gmail", "https://mail.google.com",
+     "Opening Gmail in Chrome."),
+    ("open brave and youtube", "https://www.youtube.com",
+     "Opening Youtube in Brave."),
+])
+def test_open_browser_and_then_a_site(browser_launches, opened, text, url, reply):
+    assert web.handle(text) == reply
+    assert browser_launches == [("brave" if "brave" in text else "chrome", url)]
+    assert opened == []
+
+
+def test_open_browser_and_unresolvable_second_half(browser_launches):
+    # A web verb with an unknown target: open the browser alone.
+    assert web.handle("open brave and open nowhereville dot org") == (
+        "Opening nowhereville.org in Brave."
+    )
+
+
+def test_open_browser_and_a_non_web_second_half_is_left_alone(browser_launches):
+    assert web.handle("open brave and make me a coffee") is None
+    assert browser_launches == []
+
+
+def test_multistep_does_not_swallow_other_apps(opened):
+    # Only a browser name may lead this pattern.
+    assert web.handle("open notepad and open calculator") is None
+
+
+# ------------------------------------------------------------
+# BROWSER SETTING  (default for every web command)
+# ------------------------------------------------------------
+
+def test_configured_browser_is_used_for_plain_opens(monkeypatch, browser_launches):
+    monkeypatch.setattr(config, "BROWSER", "brave")
+    opened_default = []
+    monkeypatch.setattr(web.webbrowser, "open", opened_default.append)
+
+    assert web.handle("open youtube") == "Opening Youtube."
+    assert browser_launches == [("brave", "https://www.youtube.com")]
+    assert opened_default == []
+
+
+def test_configured_browser_falls_back_when_missing(monkeypatch):
+    from lyra import browsers
+
+    monkeypatch.setattr(config, "BROWSER", "brave")
+    monkeypatch.setattr(browsers, "find_browser", lambda name: None)
+    monkeypatch.setattr(browsers, "launch_browser", lambda name, url=None: False)
+    opened_default = []
+    monkeypatch.setattr(web.webbrowser, "open", opened_default.append)
+
+    assert web.handle("open youtube") == "Opening Youtube."
+    assert opened_default == ["https://www.youtube.com"]
+
+
+def test_empty_browser_setting_uses_the_windows_default(monkeypatch):
+    monkeypatch.setattr(config, "BROWSER", "")
+    opened_default = []
+    monkeypatch.setattr(web.webbrowser, "open", opened_default.append)
+
+    web.handle("open youtube")
+    assert opened_default == ["https://www.youtube.com"]

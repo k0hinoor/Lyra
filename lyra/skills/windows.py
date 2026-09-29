@@ -84,9 +84,20 @@ def handle(text, raw=None):
         pyautogui.hotkey("ctrl", "w")
         return "Closed tab."
 
-    if re.match(r"^(?:reopen|restore|undo close) (?:the )?tab$", text):
+    if re.match(
+        r"^(?:reopen|restore|undo close)(?: (?:the|this|that|my|last|closed))* tab$",
+        text,
+    ):
         pyautogui.hotkey("ctrl", "shift", "t")
         return "Reopened tab."
+
+    if re.match(r"^(?:next|switch|go to)(?: (?:the|my|next))* tab$", text):
+        _hotkey("ctrl", "tab")
+        return "Next tab."
+
+    if re.match(r"^(?:previous|last|back|go back)(?: (?:the|my|previous))* tab$", text):
+        _hotkey("ctrl", "shift", "tab")
+        return "Previous tab."
 
     if re.match(r"^(?:refresh|reload)(?: (?:the )?(?:page|tab|window|screen))?$", text):
         pyautogui.press("f5")
@@ -119,7 +130,17 @@ def handle(text, raw=None):
         _hotkey("ctrl", "-")
         return "Zooming out."
 
-    if text == "fullscreen":
+    # --------------------------------------------------------
+    # FULL SCREEN  (F11 — never a brightness level, never an app)
+    # --------------------------------------------------------
+
+    if re.match(
+        r"^(?:(?:enter|go|switch|come|turn)(?: in| to| on)? "
+        r"|make (?:it |this |the window |the screen |the video )?"
+        r"|exit |leave |close )?"
+        r"full ?screen(?: mode)?$",
+        text,
+    ):
         pyautogui.press("f11")
         return "Toggled fullscreen."
 

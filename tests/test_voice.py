@@ -254,14 +254,16 @@ def test_speak_splits_text_into_sentences(pack):
 # SILENT MODE
 # ------------------------------------------------------------
 
-def test_a_broken_voice_prints_instead_of_playing(pack, capfd):
+def test_a_broken_voice_plays_nothing_and_leaves_printing_to_the_session(pack, capfd):
+    # Printing every reply as "Lyra: ..." is the Session's job now; if the
+    # Voice also printed in silent mode, every reply would appear twice.
     voice, _piper, device = pack()
     voice.ok = False
 
     voice.speak_stream(iter(["Hello there.", "  ", None]))
 
     assert device.streams == []
-    assert "Lyra: Hello there." in capfd.readouterr().out
+    assert "Hello there." not in capfd.readouterr().out
 
 
 def test_the_beep_uses_the_loaded_rate(pack):
@@ -303,3 +305,171 @@ def test_stop_silences_playback(pack):
     voice.stop()
 
     assert device.stopped
+
+
+# ------------------------------------------------------------
+# VOICE SPEED  (VOICE_SPEED -> length_scale)
+# ------------------------------------------------------------
+
+class ConfigAwareFakePiperVoice(FakePiperVoice):
+    """Records the synthesis config the way piper 1.3 accepts it."""
+
+    def __init__(self, sample_rate=22050):
+        super().__init__(sample_rate)
+        self.configs = []
+
+    def synthesize(self, text, config=None, **kwargs):
+        self.configs.append(config)
+        self.spoken.append(text)
+        yield FakeChunk(self.rate, b"\x11\x22" * 40)
+
+
+def _pack_with_speed(monkeypatch, speed):
+    piper_voice = ConfigAwareFakePiperVoice()
+
+    class FakeSynthesisConfig:
+        def __init__(self, length_scale=None):
+            self.length_scale = length_scale
+
+    fake_piper = SimpleNamespace(
+        PiperVoice=SimpleNamespace(load=lambda path: piper_voice),
+        SynthesisConfig=FakeSynthesisConfig,
+    )
+    monkeypatch.setitem(sys.modules, "piper", fake_piper)
+    monkeypatch.setattr(voice_module, "ensure_voice_pack", lambda: "fake.onnx")
+    monkeypatch.setattr(voice_module, "sd", FakeSoundDevice(), raising=False)
+    monkeypatch.setattr(voice_module, "_SD_OK", True)
+    monkeypatch.setattr(config, "VOICE_SPEED", speed)
+
+    return voice_module.Voice(), piper_voice
+
+
+def test_synthesis_receives_the_inverse_of_voice_speed(monkeypatch):
+    voice, piper_voice = _pack_with_speed(monkeypatch, 1.15)
+
+    voice.speak_stream(iter(["One sentence here."]))
+
+    (synth_config,) = piper_voice.configs
+    assert synth_config.length_scale == pytest.approx(1.0 / 1.15)
+
+
+def test_a_slower_voice_gets_a_bigger_length_scale(monkeypatch):
+    voice, piper_voice = _pack_with_speed(monkeypatch, 0.8)
+
+    voice.speak_stream(iter(["One sentence here."]))
+
+    assert piper_voice.configs[0].length_scale == pytest.approx(1.25)
+
+
+def test_old_piper_without_config_still_speaks(monkeypatch):
+    # synthesize(text) only — the speed kwargs must degrade gracefully
+    voice, _piper = _pack_with_speed(monkeypatch, 1.15)
+
+    def old_synthesize(text):
+        yield FakeChunk(22050, b"\x11\x22" * 40)
+
+    _piper.synthesize = old_synthesize
+
+    voice.speak_stream(iter(["One sentence here."]))     # must not raise
+
+
+# ------------------------------------------------------------
+# ATOMIC VOICE DOWNLOAD
+# ------------------------------------------------------------
+
+class StreamingResponse:
+    def __init__(self, chunks, total=None, ok=True):
+        self._chunks = chunks
+        self.headers = {"content-length": str(total)} if total else {}
+        self._ok = ok
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def raise_for_status(self):
+        if not self._ok:
+            raise RuntimeError("HTTP error")
+
+    def iter_content(self, chunk_size=None):
+        for chunk in self._chunks:
+            yield chunk
+
+
+def test_download_is_renamed_into_place_only_when_complete(monkeypatch, tmp_path):
+    target = tmp_path / "voice.onnx"
+    payload = b"0123456789" * 100
+
+    monkeypatch.setattr(
+        voice_module.requests, "get",
+        lambda url, **kwargs: StreamingResponse([payload], total=len(payload)),
+    )
+
+    voice_module._download_file("https://example.invalid/voice.onnx", target)
+
+    assert target.read_bytes() == payload
+    assert not (tmp_path / "voice.onnx.part").exists()
+
+
+def test_a_truncated_download_leaves_no_model_behind(monkeypatch, tmp_path):
+    target = tmp_path / "voice.onnx"
+
+    monkeypatch.setattr(
+        voice_module.requests, "get",
+        lambda url, **kwargs: StreamingResponse([b"12345"], total=1000),
+    )
+
+    with pytest.raises(IOError, match="incomplete"):
+        voice_module._download_file("https://example.invalid/voice.onnx", target)
+
+    assert not target.exists()
+    assert not (tmp_path / "voice.onnx.part").exists()
+
+
+def test_an_empty_download_is_refused(monkeypatch, tmp_path):
+    target = tmp_path / "voice.onnx"
+
+    monkeypatch.setattr(
+        voice_module.requests, "get",
+        lambda url, **kwargs: StreamingResponse([b""], total=None),
+    )
+
+    with pytest.raises(IOError, match="empty"):
+        voice_module._download_file("https://example.invalid/voice.onnx", target)
+
+    assert not target.exists()
+
+
+def test_an_interrupted_download_is_retried_next_run(monkeypatch, tmp_path):
+    target = tmp_path / "voice.onnx"
+
+    # a stale .part from a killed previous run must not block the retry
+    stale = tmp_path / "voice.onnx.part"
+    stale.write_bytes(b"partial junk")
+
+    payload = b"complete voice model"
+    monkeypatch.setattr(
+        voice_module.requests, "get",
+        lambda url, **kwargs: StreamingResponse([payload], total=len(payload)),
+    )
+
+    voice_module._download_file("https://example.invalid/voice.onnx", target)
+
+    assert target.read_bytes() == payload
+    assert not stale.exists()
+
+
+def test_ensure_voice_pack_skips_the_download_when_complete(monkeypatch, tmp_path):
+    monkeypatch.setattr(config, "VOICE_DIR", tmp_path)
+    model = tmp_path / (config.VOICE_MODEL + ".onnx")
+    model.write_bytes(b"model")
+    (tmp_path / (config.VOICE_MODEL + ".onnx.json")).write_text("{}", encoding="utf-8")
+
+    def refuse(*args, **kwargs):
+        raise AssertionError("nothing may be downloaded")
+
+    monkeypatch.setattr(voice_module.requests, "get", refuse)
+
+    assert voice_module.ensure_voice_pack() == model

@@ -121,3 +121,44 @@ def test_other_commands_are_left_alone(autogui, text):
 def test_no_pyautogui_means_no_window_control(monkeypatch):
     monkeypatch.setattr(windows, "_PYAUTOGUI_OK", False)
     assert windows.handle("minimize window") is None
+
+
+# ------------------------------------------------------------
+# FULL SCREEN — EVERY SPOKEN FORM TOGGLES F11
+# ------------------------------------------------------------
+
+@pytest.mark.parametrize("text", [
+    "fullscreen",
+    "full screen",
+    "full screen mode",
+    "make it full screen",
+    "make it fullscreen",
+    "make full screen",
+    "make the window full screen",
+    "go full screen",
+    "enter full screen",
+    "exit full screen",
+    "exit fullscreen",
+    "leave full screen",
+    "close full screen",
+])
+def test_full_screen_phrasings_toggle_f11(autogui, text):
+    assert windows.handle(text) == "Toggled fullscreen."
+    assert autogui.pressed("f11")
+
+
+# ------------------------------------------------------------
+# TAB CONTROLS THAT USED TO FALL THROUGH TO CHAT
+# ------------------------------------------------------------
+
+@pytest.mark.parametrize("text, combo", [
+    ("next tab", ("ctrl", "tab")),
+    ("switch tab", ("ctrl", "tab")),
+    ("previous tab", ("ctrl", "shift", "tab")),
+    ("reopen closed tab", ("ctrl", "shift", "t")),
+    ("restore the closed tab", ("ctrl", "shift", "t")),
+])
+def test_more_tab_controls(autogui, text, combo):
+    reply = windows.handle(text)
+    assert reply is not None, f"{text!r} must not fall through to chat"
+    assert autogui.hotkeyed(*combo)

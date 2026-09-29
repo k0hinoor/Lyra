@@ -81,3 +81,63 @@ def test_executor_stops_before_dispatching_next_step(monkeypatch):
     result = executor.run(plan)
     assert calls == ["enter"]
     assert result.status is Status.STOPPED
+
+
+# ------------------------------------------------------------
+# OPEN_URL AND LITERAL TYPE_TEXT DISPATCH
+# ------------------------------------------------------------
+
+def test_open_url_is_dispatched_through_the_browsers_module(monkeypatch):
+    from lyra import browsers
+    opened = []
+
+    def fake_open(url, browser=None):
+        opened.append((url, browser))
+        return True
+
+    monkeypatch.setattr(browsers, "open_url", fake_open)
+    plan = validate_plan({"intent": "computer_task", "actions": [
+        {"type": "open_url", "url": "https://www.youtube.com", "browser": "brave"},
+    ]})
+    result = ActionExecutor().run(plan)
+    assert result.status is Status.UNKNOWN          # issued, not screen-verified
+    assert opened == [("https://www.youtube.com", "brave")]
+
+
+def test_open_url_failure_fails_the_task(monkeypatch):
+    from lyra import browsers
+    monkeypatch.setattr(browsers, "open_url", lambda url, browser=None: False)
+    plan = validate_plan({"intent": "computer_task", "actions": [
+        {"type": "open_url", "url": "https://www.youtube.com"},
+    ]})
+    result = ActionExecutor().run(plan)
+    assert result.status is Status.FAILURE
+
+
+def test_literal_type_text_types_the_given_text(monkeypatch):
+    from lyra.computer import automation
+    typed = []
+    monkeypatch.setattr(automation, "type_text", typed.append)
+    plan = validate_plan({"intent": "computer_task", "actions": [
+        {"type": "open_url", "url": "https://www.youtube.com"},
+        {"type": "type_text", "text": "lofi"},
+    ]})
+    result = ActionExecutor().run(plan, generate_text=lambda _i: "never used")
+    assert result.status is Status.UNKNOWN
+    assert typed == ["lofi"]
+
+
+def test_generated_type_text_still_uses_the_writer(monkeypatch):
+    from lyra.computer import automation
+    typed = []
+    monkeypatch.setattr(automation, "open_app", lambda app: None)
+    monkeypatch.setattr(automation, "focus_app_window", lambda app: True)
+    monkeypatch.setattr(automation, "type_text", typed.append)
+    plan = validate_plan({"intent": "computer_task", "actions": [
+        {"type": "open_app", "app": "notepad"},
+        {"type": "generate_text", "instruction": "Write about India"},
+        {"type": "type_text", "source": "generated_text"},
+    ]})
+    result = ActionExecutor().run(plan, generate_text=lambda _i: "India is diverse.")
+    assert result.status is Status.UNKNOWN
+    assert typed == ["India is diverse."]

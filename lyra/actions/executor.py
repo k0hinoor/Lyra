@@ -6,6 +6,7 @@ import threading
 from dataclasses import dataclass
 from enum import Enum
 
+from .. import browsers
 from ..computer import automation
 from .schema import ActionPlan
 
@@ -73,6 +74,11 @@ class ActionExecutor:
                 if kind == "open_app":
                     automation.open_app(action["app"])
                     opened_app = action["app"]
+                elif kind == "open_url":
+                    # URL scheme/host/credentials were validated already;
+                    # open_url re-checks as defense in depth.
+                    if not browsers.open_url(action["url"], action.get("browser")):
+                        raise RuntimeError(f"I couldn't open {action['url'][:120]}")
                 elif kind == "generate_text":
                     if generate_text is None:
                         raise RuntimeError("Text generation callback is unavailable")
@@ -96,9 +102,14 @@ class ActionExecutor:
                                 f"Generated text did not meet the exact {required}-word constraint"
                             )
                 elif kind == "type_text":
-                    if generated_text is None:
-                        raise RuntimeError("No generated text is available to type")
-                    automation.type_text(generated_text)
+                    literal = action.get("text")
+                    if literal is not None:
+                        # Short user-given text (e.g. a search query).
+                        automation.type_text(literal)
+                    else:
+                        if generated_text is None:
+                            raise RuntimeError("No generated text is available to type")
+                        automation.type_text(generated_text)
                 elif kind == "press_key":
                     automation.press_key(action["key"])
                 elif kind == "hotkey":

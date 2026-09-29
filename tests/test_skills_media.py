@@ -456,3 +456,29 @@ def test_a_com_error_inside_the_new_property_is_not_hidden(fake_pycaw):
     fake_pycaw(AudioDevice())
     with pytest.raises(OSError):
         media._volume_interface()
+
+
+# ------------------------------------------------------------
+# FULL SCREEN IS NOT A BRIGHTNESS COMMAND
+# ------------------------------------------------------------
+# Bug: "full screen" was parsed as level "full" of subject "screen"
+# and set the brightness to 100%.
+
+@pytest.mark.parametrize("text", [
+    "full screen",
+    "fullscreen",
+    "make it full screen",
+    "make it fullscreen",
+    "go full screen",
+    "exit full screen",
+])
+def test_full_screen_never_touches_brightness(brightness, text):
+    brightness.level = 42
+
+    assert media.handle(text) is None
+    assert brightness.level == 42, "brightness must be untouched"
+    assert brightness.calls == []
+
+
+def test_full_volume_is_still_a_real_command(volume):
+    assert media.handle("full volume") == "Volume set to 100 percent."

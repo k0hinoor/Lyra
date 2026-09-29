@@ -13,6 +13,7 @@
 """
 
 import logging
+import os
 import queue
 import threading
 
@@ -47,6 +48,52 @@ def _voice_urls():
     return base + ".onnx", base + ".onnx.json"
 
 
+def _download_file(url, path):
+    """Download atomically: temp file first, size check, then rename.
+
+    An interrupted download leaves only the .part file behind, never a
+    corrupt voice model that would fail to load on the next start.
+    """
+
+    temp_path = path.with_name(path.name + ".part")
+
+    if temp_path.exists():
+        temp_path.unlink()
+
+    with requests.get(url, stream=True, timeout=60) as response:
+        response.raise_for_status()
+
+        total = int(response.headers.get("content-length", 0))
+        done = 0
+
+        with open(temp_path, "wb") as f:
+
+            for chunk in response.iter_content(chunk_size=1024 * 1024):
+                f.write(chunk)
+                done += len(chunk)
+
+                if total:
+                    percent = done * 100 // total
+                    print(f"\r  {percent}%  ({done // (1024 * 1024)} MB)"
+                          f"{' ' * 8}", end="", flush=True)
+
+    print(" done.")
+
+    size = temp_path.stat().st_size
+
+    if size == 0:
+        temp_path.unlink(missing_ok=True)
+        raise IOError(f"Downloaded file is empty: {url}")
+
+    if total and size != total:
+        temp_path.unlink(missing_ok=True)
+        raise IOError(
+            f"Download incomplete ({size} of {total} bytes): {url}"
+        )
+
+    os.replace(temp_path, path)
+
+
 def ensure_voice_pack():
     """Download the voice pack if missing. Returns the model path."""
 
@@ -64,25 +111,7 @@ def ensure_voice_pack():
             continue
 
         print(f"Downloading voice pack: {path.name} ...")
-
-        with requests.get(url, stream=True, timeout=60) as response:
-            response.raise_for_status()
-
-            total = int(response.headers.get("content-length", 0))
-            done = 0
-
-            with open(path, "wb") as f:
-
-                for chunk in response.iter_content(chunk_size=1024 * 1024):
-                    f.write(chunk)
-                    done += len(chunk)
-
-                    if total:
-                        percent = done * 100 // total
-                        print(f"\r  {percent}%  ({done // (1024 * 1024)} MB)"
-                              f"{' ' * 8}", end="", flush=True)
-
-        print(" done.")
+        _download_file(url, path)
 
     return model_path
 
@@ -134,6 +163,47 @@ class Voice:
     # SYNTHESIZE
     # --------------------------------------------------------
 
+    @staticmethod
+    def _synthesis_config():
+        """VOICE_SPEED as a Piper SynthesisConfig, or None if unavailable.
+
+        length_scale is the inverse of speed: 1.15x speed means the
+        synthesizer stretches each sound to 1/1.15 of its length.
+        """
+
+        speed = float(getattr(config, "VOICE_SPEED", 1.0) or 1.0)
+
+        try:
+            try:
+                from piper import SynthesisConfig
+            except ImportError:
+                from piper.synthesize import SynthesisConfig
+        except Exception:
+            return None
+
+        try:
+            return SynthesisConfig(length_scale=1.0 / speed)
+        except Exception:
+            return None
+
+    def _piper_chunks(self, text):
+        """piper.synthesize() with VOICE_SPEED applied, tolerating old APIs."""
+
+        synth_config = self._synthesis_config()
+
+        if synth_config is not None:
+            try:
+                return self.piper.synthesize(text, config=synth_config)
+            except TypeError:
+                log.debug("Piper does not accept a config object; using kwargs")
+
+        try:
+            return self.piper.synthesize(
+                text, length_scale=1.0 / float(getattr(config, "VOICE_SPEED", 1.0) or 1.0)
+            )
+        except TypeError:
+            return self.piper.synthesize(text)
+
     def _synthesize(self, text):
         """
         text -> (sample_rate, int16 PCM bytes).
@@ -151,7 +221,7 @@ class Voice:
         chunks = []
         rate = 0
 
-        for chunk in self.piper.synthesize(text):
+        for chunk in self._piper_chunks(text):
             sample_rate = int(getattr(chunk, "sample_rate", 0) or 0)
             if sample_rate <= 0:
                 raise ValueError(f"Piper returned invalid sample rate: {sample_rate}")
@@ -286,10 +356,11 @@ class Voice:
         self._stop_event.clear()
 
         if not self.ok:
-            # silent mode — just print
-            for sentence in sentences:
-                if sentence and sentence.strip():
-                    print("Lyra:", sentence)
+            # Silent mode. Printing is the Session's job (it always prints
+            # every reply as "Lyra: ..."), so here the sentences are only
+            # drained — printing twice would duplicate every line.
+            for _sentence in sentences:
+                pass
             return
 
         # Replies are bounded by LYRA's output token limit; an unbounded queue

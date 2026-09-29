@@ -10,6 +10,7 @@
 ============================================================
 """
 
+import datetime
 import json
 import logging
 import re
@@ -32,23 +33,29 @@ CONNECTION_FALLBACK = (
 
 SYSTEM_PROMPT = (
     "You are Lyra, " + config.USER_NAME + "'s personal AI assistant, "
-    "running fully local on their PC. You can also control the PC.\n"
+    "running fully local on their PC. This conversation channel is for "
+    "talking only; Lyra's separate command system carries out actions "
+    "on the PC before you are ever asked.\n"
     "Your name is Lyra. Never say you were made by any company, "
     "and never identify as any other AI or model.\n"
     "You are helpful, concise, natural and conversational.\n"
     "\n"
-    "IMPORTANT — you operate this computer, you are not a manual:\n"
-    "- You can already do it yourself: change the volume, brightness and "
-    "mute, open and close apps, files, folders and settings, control "
-    "windows, tabs, the keyboard, the clipboard, media playback and "
-    "power, and read the time, battery, disk and network.\n"
-    "- So never reply with instructions. No steps, no 'right-click the "
-    "sound icon', no 'go to Settings', no 'press these keys', no menus, "
-    "no key shortcuts, no 'here is how you do it'.\n"
-    "- If the user asks for something the computer can do and it has "
-    "already been done, just say it is done in a few words.\n"
-    "- If it is genuinely beyond you, say so in one short sentence "
-    "instead of describing where the button is.\n"
+    "IMPORTANT — you cannot control the computer from here:\n"
+    "- Requests about the volume, brightness and mute, opening or closing "
+    "apps, files, folders, settings, windows, tabs, the keyboard, the "
+    "clipboard, media playback, power, sleep mode, turbo modes and "
+    "similar are handled elsewhere. If such a request reaches you, it "
+    "was NOT carried out.\n"
+    "- So never claim to have done anything, and never say it is done. "
+    "In one short sentence, say briefly that you can't do that one.\n"
+    "- You cannot see the screen, any window, the camera or the desktop, "
+    "and you have no clock of your own; never describe what is on "
+    "screen as if you saw it, and never invent the time or date.\n"
+    "- You are not a manual: never reply with instructions. No steps, no "
+    "'right-click the sound icon', no 'go to Settings', no 'press these "
+    "keys', no menus, no key shortcuts, no 'here is how you do it'.\n"
+    "- If something is genuinely beyond Lyra, say so in one short "
+    "sentence instead of describing where the button is.\n"
     "\n"
     "IMPORTANT — your replies are spoken out loud through a voice, so:\n"
     "- Answer in plain spoken sentences only.\n"
@@ -57,6 +64,15 @@ SYSTEM_PROMPT = (
     "- Do not add unasked advice, encouragement or follow-up topics.\n"
     "- Do not mention memories unless they are directly relevant.\n"
 )
+
+
+def current_datetime_line(now=None):
+    """The local date and time, injected fresh into every request."""
+    now = now or datetime.datetime.now()
+    return (
+        f"Current date and time: {now.strftime('%A %d %B %Y')}, "
+        f"{now.strftime('%I:%M %p').lstrip('0')}."
+    )
 
 # ------------------------------------------------------------
 # COMPUTER-TASK PLANNING / WRITING PROMPTS
@@ -90,22 +106,29 @@ def _planner_instruction(user_text):
         "with 1 to 8 actions, in order.\n"
         'Every action is an object with a "type" field and exactly these fields:\n'
         '{"type": "open_app", "app": APP_NAME}\n'
+        '{"type": "open_url", "url": "https://...", "browser": BROWSER}\n'
         '{"type": "generate_text", "instruction": WHAT_TO_WRITE}\n'
         '{"type": "type_text", "source": "generated_text"}\n'
+        '{"type": "type_text", "text": SHORT_TEXT}\n'
         '{"type": "press_key", "key": KEY}\n'
         '{"type": "hotkey", "keys": [KEY, KEY]}\n'
         '{"type": "move_mouse", "x": X, "y": Y}\n'
         '{"type": "click", "button": "left", "clicks": 1}\n'
         '{"type": "scroll", "direction": "down", "amount": 3}\n'
         '{"type": "drag_drop", "start_x": X, "start_y": Y, "end_x": X, "end_y": Y}\n'
+        "open_url opens a website; the URL must start with http:// or https:// "
+        "and the optional browser is one of: brave, chrome, edge, firefox.\n"
+        "To type short text the user gave (like a search query): type_text with "
+        '"text". To write longer text: generate_text, then type_text with '
+        '"source": "generated_text".\n'
         "press_key KEY is one of: " + ", ".join(sorted(PRESSABLE_KEYS)) + ".\n"
         "hotkey keys come from: " + ", ".join(sorted(HOTKEY_KEYS)) + ".\n"
         "To write something: open_app, then generate_text, then type_text.\n"
         "In the generate_text instruction keep the user's own topic and length; "
         "do not add requirements they did not ask for.\n"
         "Only use screen coordinates the user gave; never invent them.\n"
-        "Never plan commands, code, URLs, file deletion, power actions, "
-        "messages or emails.\n"
+        "Never plan commands, code, file deletion, power actions, messages or "
+        "emails. A URL is only allowed inside open_url, http or https only.\n"
         "Example task: open notepad and write a short poem about the rain\n"
         "Example reply: " + json.dumps(PLAN_EXAMPLE) + "\n"
         "Task: " + user_text
@@ -165,7 +188,9 @@ class Brain:
 
     def _messages(self, user_text):
 
-        system = SYSTEM_PROMPT + self.memory.context_block()
+        # The date/time line is rebuilt on every request so the model never
+        # has to guess (or invent) what day and time it is.
+        system = SYSTEM_PROMPT + current_datetime_line() + "\n" + self.memory.context_block()
 
         messages = [{"role": "system", "content": system}]
         messages.extend(self.history[-config.HISTORY_MESSAGES:])

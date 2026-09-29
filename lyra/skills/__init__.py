@@ -32,13 +32,14 @@ _SKILLS = (
 )
 
 
-def route(text, raw=None):
+def route_with_handler(text, raw=None):
     """
     Try every skill with the normalized text.
 
-    Returns (reply, confirmation):
+    Returns (reply, confirmation, handler):
       reply        str to speak, or None
       confirmation Confirmation object, or None
+      handler      "skill:<name>" of the skill that answered, or None
     """
 
     raw = raw if raw is not None else text
@@ -49,15 +50,30 @@ def route(text, raw=None):
             result = skill.handle(text, raw)
 
         except Exception:
-            log.exception("Skill %s failed", getattr(skill, "name", skill))
+            log.exception("Skill %s failed", skill.name())
             result = None
 
         if result is None:
             continue
 
+        handler = f"skill:{skill.name()}"
+
         if isinstance(result, Confirmation):
-            return None, result
+            return None, result, handler
 
-        return str(result), None
+        return str(result), None, handler
 
-    return None, None
+    return None, None, None
+
+
+def route(text, raw=None):
+    """
+    Try every skill with the normalized text.
+
+    Returns (reply, confirmation):
+      reply        str to speak, or None
+      confirmation Confirmation object, or None
+    """
+
+    reply, confirmation, _handler = route_with_handler(text, raw)
+    return reply, confirmation

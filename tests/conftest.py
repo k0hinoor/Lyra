@@ -230,6 +230,35 @@ def isolated_memory_file(tmp_path, monkeypatch):
     return config.MEMORY_FILE
 
 
+@pytest.fixture(autouse=True)
+def isolated_log_dir(tmp_path, monkeypatch):
+    """Never let a test write transcripts or logs to the real data dir."""
+
+    from lyra import config
+
+    log_dir = tmp_path / "logs"
+    monkeypatch.setattr(config, "LOG_DIR", log_dir)
+    return log_dir
+
+
+@pytest.fixture
+def browser_launches(monkeypatch):
+    """Record every named-browser launch; pretend every browser exists."""
+
+    from lyra import browsers
+
+    launches = []
+
+    def _launch(name, url=None):
+        launches.append((name, url))
+        return True
+
+    monkeypatch.setattr(browsers, "find_browser", lambda name: f"C:/fake/{name}.exe")
+    monkeypatch.setattr(browsers, "launch_browser", _launch)
+
+    return launches
+
+
 # ------------------------------------------------------------
 # FIXTURES — fake dependencies
 # ------------------------------------------------------------

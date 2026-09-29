@@ -81,22 +81,56 @@ def ensure_ollama():
 
 
 def check_for_updates():
+    """Check for a GitHub Release and install it. True when files changed."""
     from .updater import check_latest_release, download_and_install
     try:
         release = check_latest_release(timeout=5)
     except Exception as exc:
         log.info("GitHub update check unavailable; continuing offline: %s", exc)
-        return
+        return False
     if release is None:
-        return
+        return False
     print(f"LYRA update available: v{LYRA_VERSION} → v{release['version']}")
     if input("Install update before launching? [y/N] ").strip().casefold() in {"y", "yes"}:
         try:
             download_and_install(release)
-            print("Update installed. Launching LYRA with the updated application files.")
         except Exception as exc:
             log.exception("Update failed; current installation was rolled back")
             print(f"Update failed safely: {exc}")
+            return False
+        return True
+    return False
+
+
+def install_requirements(app_dir=None):
+    """Re-run pip install -r requirements.txt after an update."""
+    requirements = Path(app_dir or config.BASE_DIR) / "requirements.txt"
+    if not requirements.is_file():
+        return True
+    print("Refreshing dependencies (pip install -r requirements.txt)...")
+    result = subprocess.run(
+        [sys.executable, "-m", "pip", "install", "-r", str(requirements)],
+        check=False,
+    )
+    if result.returncode:
+        print("Dependency refresh reported an error; LYRA will still try to start.")
+        return False
+    return True
+
+
+def restart_after_update():
+    """Restart the process so the updated modules are the ones that run.
+
+    The modules already imported by THIS process stay stale in memory;
+    only a fresh interpreter picks up the new files. --no-update-check
+    prevents an update loop if the in-memory version number is old.
+    """
+    args = [sys.executable, "-m", "lyra.launcher", "--no-update-check", *sys.argv[1:]]
+    log.info("Restarting LYRA after update: %s", " ".join(args))
+    print("Restarting LYRA with the updated files...")
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os.execv(sys.executable, args)
 
 
 def main():
@@ -104,10 +138,17 @@ def main():
     parser.add_argument("--no-update-check", action="store_true", help="skip GitHub release check")
     parser.add_argument("--skip-llm-check", action="store_true", help="start core without validating Ollama")
     args, core_args = parser.parse_known_args()
-    configure_logging(config.LOG_DIR, config.LOG_LEVEL)
+    configure_logging(config.LOG_DIR, config.LOG_LEVEL, config.CONSOLE_LOG_LEVEL)
     print(f"LYRA v{LYRA_VERSION}")
-    if not args.no_update_check:
-        check_for_updates()
+    if not args.no_update_check and check_for_updates():
+        install_requirements()
+        try:
+            restart_after_update()          # does not return on success
+        except OSError as exc:
+            log.exception("Restart after update failed")
+            print(f"Restart failed ({exc}). Start LYRA again manually to use "
+                  "the updated version.")
+            return 1
     if not args.skip_llm_check and not ensure_ollama():
         return 2
     main_path = config.BASE_DIR / "main.py"

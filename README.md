@@ -18,9 +18,11 @@ Microphone → short Vosk wake gate → Whisper Base command STT → session/rou
 User data (%APPDATA%/Lyra on Windows): settings, memory, logs, models
 ```
 
-- `lyra/ear.py` loads one Faster-Whisper model per process. The default is CPU `int8`, `base.en`.
+- `lyra/ear.py` loads one Faster-Whisper model per process. The default is CPU `int8`, `base.en`. Transcription passes LYRA's vocabulary as hotwords (Lyra, Brave, Chrome, YouTube, Notepad, terminate execution) so base.en stops mishearing them ("brave" → "breathe", "terminate" → "terminal").
 - `lyra/wake.py` loads the optional Vosk model once. While asleep it processes short audio clips and runs full Whisper only after a wake hit. If the Vosk model is absent, LYRA safely falls back to the previous Whisper wake gate.
-- `lyra/voice.py` loads Piper once. Piper's 16-bit PCM bytes are validated and converted to NumPy `int16` arrays before sounddevice playback. One lock serializes beeps and speech; streams are stopped and closed after each response.
+- `lyra/voice.py` loads Piper once. The voice pack download is atomic (temp file + size check + rename), so an interrupted download can never leave a corrupt model. Speaking speed follows `VOICE_SPEED` via Piper's `length_scale`. Piper's 16-bit PCM bytes are validated and converted to NumPy `int16` arrays before sounddevice playback. One lock serializes beeps and speech; streams are stopped and closed after each response.
+- `lyra/browsers.py` finds a named browser (brave, chrome, edge, firefox) through the Windows App Paths registry key and standard install folders, and starts it with a URL as an argument list — never through a shell.
+- `lyra/transcript.py` appends every exchange (what LYRA heard, her full reply, and what handled it) to a dated transcript file under `logs/`.
 - `lyra/brain.py` keeps Ollama warm (`keep_alive`) and streams ordinary responses. The structured planner is invoked only for detected multi-step computer requests to avoid adding an LLM round trip to regular chat or known single commands.
 - `lyra/actions/` validates bounded JSON plans and dispatches only registered Python actions. No model-generated PowerShell, CMD, Python, or shell command is evaluated.
 - `lyra/computer/` is the desktop automation adapter; `lyra/screen/` provides `capture_screen()` and window-title capture for future visual reasoning.
@@ -46,16 +48,17 @@ The installer does **not** silently fetch Phi model files. The Piper voice pack 
 
 ### Launch
 
-Use the **LYRA** Desktop/Start Menu shortcut, or double-click `run_lyra.bat` in the install directory. For development:
+Use the **LYRA** Desktop/Start Menu shortcut, or double-click `run_lyra.bat` in the install directory (it changes to its own folder first, so it also works when started from another directory, e.g. `C:\Users\USER\Lyra\run_lyra.bat` from any prompt). For development:
 
 ```bat
 .venv\Scripts\python.exe -m lyra.launcher
 .venv\Scripts\python.exe -m lyra.launcher --text
 .venv\Scripts\python.exe -m lyra.launcher --always
 .venv\Scripts\python.exe main.py --devices
+.venv\Scripts\python.exe main.py --voice-test
 ```
 
-`--text` and `--always` are passed through to the core. `--no-update-check` skips the optional release check; `--skip-llm-check` is intended for offline/development diagnostics only.
+`--text` and `--always` are passed through to the core. `--no-update-check` skips the optional release check; `--skip-llm-check` is intended for offline/development diagnostics only. `--voice-test` speaks one sample sentence with the currently configured voice (`VOICE_MODEL`) and speed (`VOICE_SPEED`) and exits — use it after changing either setting.
 
 ## Ollama and model setup
 
@@ -88,21 +91,33 @@ Create `%APPDATA%\Lyra\settings.json` from `config/settings.example.json`. Suppo
 ```json
 {
   "OLLAMA_MODEL": "phi4-mini:3.8b",
-  "VOICE_MODEL": "en_US-amy-medium",
+  "VOICE_MODEL": "en_US-lessac-medium",
+  "VOICE_SPEED": 1.15,
+  "BROWSER": "",
   "OUTPUT_DEVICE": null,
   "WAKE_FUZZY_MAX_DISTANCE": 2,
   "WAKE_WINDOW_SECONDS": 4.0,
   "WHISPER_MODEL": "base.en",
   "OLLAMA_URL": "http://localhost:11434/api/chat",
-  "LOG_LEVEL": "INFO"
+  "LOG_LEVEL": "INFO",
+  "CONSOLE_LOG_LEVEL": "WARNING"
 }
 ```
 
-Environment variables such as `LYRA_OLLAMA_MODEL`, `LYRA_VOICE_MODEL`, and `LYRA_OUTPUT_DEVICE` override JSON settings. Never put API credentials in source or commit personal settings. Local state includes:
+Setting notes:
+
+- `VOICE_MODEL` — any English Piper voice name (`en_US-lessac-medium` is the default; `en_US-amy-medium`, `en_US-lessac-high`, `en_GB-jenny-high`, ...). Packs download atomically on first use (temp file + size check + rename), so an interrupted download cannot leave a corrupt model. Test a change with `python main.py --voice-test`.
+- `VOICE_SPEED` — speaking-speed multiplier, clamped to `0.8`–`1.5`; default `1.15` (a little faster than the Piper default). Internally passed to Piper as `length_scale = 1 / VOICE_SPEED`.
+- `BROWSER` — `"brave"`, `"chrome"`, `"edge"`, `"firefox"` or `""` (empty = the Windows default browser). Used by all web commands when no browser is named in the request; see Commands below.
+- `LOG_LEVEL` — detail written to `logs/lyra.log` (default `INFO`, full diagnostics for bug reports).
+- `CONSOLE_LOG_LEVEL` — what the console shows (default `WARNING`, so INFO chatter such as Whisper's audio-duration lines stays out of the conversation view).
+
+Environment variables such as `LYRA_OLLAMA_MODEL`, `LYRA_VOICE_MODEL`, `LYRA_VOICE_SPEED`, `LYRA_BROWSER`, `LYRA_CONSOLE_LOG_LEVEL`, and `LYRA_OUTPUT_DEVICE` override JSON settings. Never put API credentials in source or commit personal settings. Local state includes:
 
 - `memory.json` — persistent user memory
 - `settings.json` — non-secret user preferences
-- `logs/lyra.log` — rotating diagnostics
+- `logs/lyra.log` — rotating diagnostics (full INFO detail even when the console is quiet)
+- `logs/conversation-YYYY-MM-DD.txt` — dated transcript: what LYRA heard, her full reply, and what handled it (which skill, the planner, or the chat model)
 - `models/` — Piper and optional Vosk assets
 
 An existing project-root `memory.json` is copied to the user data directory on first load when no new memory file exists. The original is not deleted.
@@ -110,6 +125,8 @@ An existing project-root `memory.json` is copied to the user data directory on f
 ## Updating LYRA
 
 The launcher checks the latest stable GitHub Release and compares semantic versions; it does not compare timestamps or download a branch. If a newer release is available it shows `LYRA update available: vX → vY` and asks before downloading. It verifies the release SHA-256, stages files, backs up replaced files, and rolls back on an installation error. User data is outside the update tree and is preserved.
+
+After a successful install the launcher re-runs `pip install -r requirements.txt` (with the private venv's Python) and then **restarts the LYRA process** with `--no-update-check`, because the modules already loaded in memory are the old ones; only a fresh interpreter runs the updated files. If the restart itself fails, LYRA tells you to start it again manually.
 
 To publish a release from a clean, committed checkout after merging the change to your release branch:
 
@@ -126,7 +143,9 @@ Install/configure GitHub CLI (`gh auth login`) before publishing. The updater in
 
 ## Structured actions, computer control, and screen API
 
-Existing deterministic skills remain in place. Multi-step desktop requests can be planned as a JSON list of allow-listed actions: open an approved app, generate text, type generated text, press a limited key, use a shortcut, move/click, scroll, or drag/drop. Python validates every field, action count, app name, key, coordinates, and operation before dispatch. Unknown actions and terminal apps requested through the LLM planner are rejected. There is no automatic arbitrary command, code, delete, shutdown, message, or email action.
+Existing deterministic skills remain in place. Multi-step desktop requests can be planned as a JSON list of allow-listed actions: open an approved app, open a safe URL (`open_url`), generate text, type generated or short user-given text, press a limited key, use a shortcut, move/click, scroll, or drag/drop. Python validates every field, action count, app name, key, URL, coordinates, and operation before dispatch. Unknown actions and terminal apps requested through the LLM planner are rejected. There is no automatic arbitrary command, code, delete, shutdown, message, or email action.
+
+`open_url` accepts only `http://` and `https://` URLs, validated with `urllib.parse`: a host is required and URLs with embedded credentials or `javascript:`/`file:`/`data:` schemes are refused. The optional `browser` field names brave, chrome, edge, or firefox; without it the configured/default browser is used. `type_text` comes in two shapes: `"source": "generated_text"` (types what a preceding `generate_text` step wrote) or `"text": "..."` (types a short literal the user gave, such as a search query).
 
 The planner sends Ollama a JSON Schema of the plan (structured outputs, Ollama 0.5+; older versions fall back to plain JSON mode), and `coerce_plan()` rewrites the formats small models commonly produce anyway, such as `"open_app(app=notepad)"` or `{"open_app": {...}}`, into the canonical shape. Coercion only restructures; the strict validator still decides. A rejected plan is logged together with the model's reply. Text to type is produced by a dedicated writing prompt, and an Ollama error aborts the task instead of being typed. Before any keyboard action in an app the plan opened, LYRA brings that app's window to the front and verifies it; if it cannot, nothing is typed.
 
@@ -141,10 +160,25 @@ Known commands are handled by the existing modular skills in `lyra/skills/` (app
 - “Open Notepad”, “open sound settings”, “close Chrome”
 - “Turn the volume up”, “set brightness to 50”
 - “Type hello there”, “press enter”, “copy”, “switch window”, “scroll down”
-- “Search YouTube for lo-fi music”, “what time is it”, “remember that my exam is Friday”
+- “Search YouTube for lo-fi music”, “what time is it” (also “so what time is it”, “tell me the time”, “current time”, …), “remember that my exam is Friday”
 - Compound desktop request: “Open Notepad and write 20 words about India.” (structured planner; allow-listed Notepad only)
 
-Unknown ordinary conversation uses the local Ollama model.
+Browsers and multi-step web tasks:
+
+- Named browser: “open YouTube in Brave”, “search YouTube for lofi in Brave”, “open Gmail in Chrome” (brave, chrome, edge, firefox — launched as an executable with the URL argument, located via the App Paths registry or standard install folders).
+- Default browser: set `BROWSER` in `settings.json` (or `LYRA_BROWSER`) and every web command that does not name a browser uses it; empty means the Windows default.
+- Run-on web tasks, handled directly (no planner round trip): “open Brave and open YouTube”, “open Brave and go to YouTube”, “open Brave and search YouTube for lofi”, “open YouTube and search for lofi”.
+
+Window and tab controls:
+
+- “full screen”, “make it full screen”, “exit full screen” — toggles F11 (never touches brightness).
+- “next tab”, “previous tab”, “switch tab” (Ctrl+Tab / Ctrl+Shift+Tab), “reopen closed tab” (Ctrl+Shift+T).
+
+Power:
+
+- “Put the PC to sleep”, “sleep mode”, “put my windows in sleep mode” — all ask for confirmation first.
+
+Unknown ordinary conversation uses the local Ollama model. The chat model never claims to have performed a PC action it cannot see or control — requests that reach it by mistake get a short “I can't do that one”, and every chat request carries the current local date and time. In voice mode, filler-only utterances such as “Okay.” are dropped instead of being sent to chat.
 
 ## Development and tests
 
@@ -169,7 +203,9 @@ The tests run without physical audio devices or Ollama. Hardware-dependent funct
 - **No microphone access:** Windows Settings → Privacy & security → Microphone → allow desktop apps.
 - **Volume commands fail:** LYRA supports both the current pycaw API (`AudioDevice.EndpointVolume`) and the older `Activate()` one; any other error is printed as `Volume error: ...` and logged.
 - **"I couldn't create a valid, safe action plan":** the `WARNING ... Rejected malformed computer-action plan` line in the console and `lyra.log` gives the reason and the model's reply.
-- **Updater offers no update:** only published stable GitHub Releases with a higher semantic version and both required archive/checksum assets are eligible.
+- **Updater offers no update:** only published stable GitHub Releases with a higher semantic version and both required archive/checksum assets are eligible. After installing, LYRA re-runs `pip install -r requirements.txt` and restarts the process so the updated code actually runs.
+- **Reporting a bug:** attach the day's `logs/conversation-YYYY-MM-DD.txt` (what LYRA heard, her exact reply, and which skill/planner/chat handled it) plus `logs/lyra.log` (full INFO diagnostics — the console intentionally shows only warnings and errors).
+- **Voice sounds wrong after a settings change:** run `.venv\Scripts\python.exe main.py --voice-test`. Interrupted voice downloads repair themselves on next start (temp file + size check + rename, so a corrupt model is never left behind).
 
 ## Project tree
 
@@ -180,9 +216,12 @@ lyra/updater.py             verified GitHub Releases updater
 lyra/version.py             application version
 lyra/config.py              defaults and user-data/config paths
 lyra/wake.py                optional Vosk wake gate
-lyra/ear.py                 persistent Faster-Whisper recognizer
+lyra/ear.py                 persistent Faster-Whisper recognizer (hotword-biased)
 lyra/voice.py               persistent Piper model + typed sounddevice playback
 lyra/brain.py               Ollama streaming and structured plan requests
+lyra/browsers.py            named-browser lookup/launch for web commands
+lyra/transcript.py          dated conversation transcript writer
+lyra/logging_setup.py       quiet console + full-detail file logging
 lyra/actions/                schema and task executor
 lyra/computer/               safe desktop automation adapter
 lyra/screen/                 screen and window capture interface

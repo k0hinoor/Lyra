@@ -22,9 +22,11 @@ import time
 
 from lyra import config
 from lyra.memory import Memory
-from lyra.skills import route, Confirmation
+from lyra.skills import Confirmation, route_with_handler
+from lyra.transcript import Transcript
 from lyra.utils import (
     correct_name,
+    is_filler,
     is_sleep,
     is_terminate,
     is_thanks,
@@ -63,6 +65,8 @@ class Session:
         self.memory = memory
         self.voice = voice
         self.pending_confirmation = None
+        self.transcript = Transcript()
+        self.last_heard = ""
         from lyra.actions.executor import ActionExecutor
         self.task_executor = ActionExecutor()
         self.task_active = False
@@ -75,23 +79,39 @@ class Session:
 
     # --------------------------------------------------------
     # OUTPUT
+    #
+    # Every reply is printed IN FULL as "Lyra: ..." in both voice
+    # and text mode, and appended to the dated transcript file.
     # --------------------------------------------------------
 
-    def say(self, text):
+    def say(self, text, handler="session"):
 
         print("\nLyra:", text, "\n")
 
         if self.voice is not None:
             self.voice.speak(text)
 
-    def say_stream(self, sentences):
+        self.transcript.record(self.last_heard, text, handler)
 
-        if self.voice is not None:
-            self.voice.speak_stream(sentences)
-        else:
+    def say_stream(self, sentences, handler="chat model"):
+
+        collected = []
+
+        def stream():
             for sentence in sentences:
                 if sentence and sentence.strip():
+                    collected.append(sentence)
                     print("Lyra:", sentence)
+                yield sentence
+
+        if self.voice is not None:
+            self.voice.speak_stream(stream())
+        else:
+            for _sentence in stream():
+                pass
+
+        full_reply = " ".join(sentence.strip() for sentence in collected)
+        self.transcript.record(self.last_heard, full_reply, handler)
 
     # --------------------------------------------------------
     # CONFIRMATION HANDLING
@@ -114,6 +134,7 @@ class Session:
             say_on_confirm = confirmation.say_on_confirm or "Done."
 
             print("\nLyra:", say_on_confirm, "\n")
+            self.transcript.record(self.last_heard, say_on_confirm, "confirmation")
 
             try:
                 confirmation.action()
@@ -129,7 +150,7 @@ class Session:
         if cancelled:
 
             self.pending_confirmation = None
-            self.say("Cancelled.")
+            self.say("Cancelled.", handler="confirmation")
 
             return True
 
@@ -200,10 +221,10 @@ class Session:
         try:
             plan = self.brain.plan_actions(raw)
             if self.task_executor.stop_requested:
-                self.say("The task was stopped before any action was run.")
+                self.say("The task was stopped before any action was run.", handler="planner")
                 return
             if plan is None:
-                self.say("I couldn't create a valid, safe action plan for that task.")
+                self.say("I couldn't create a valid, safe action plan for that task.", handler="planner")
                 return
             # write_text, not the chat stream: the chat voice adds spoken
             # preambles, keeps the text in conversation history, and on an
@@ -213,20 +234,20 @@ class Session:
             if result.status.value == "FAILURE":
                 failed = next((item for item in result.results if item.status.value == "FAILURE"), None)
                 detail = failed.detail if failed else "An action failed."
-                self.say("The task stopped because an action failed: " + detail[:180])
+                self.say("The task stopped because an action failed: " + detail[:180], handler="planner")
             elif result.status.value == "STOPPED":
-                self.say("The task was stopped.")
+                self.say("The task was stopped.", handler="planner")
             else:
-                self.say("I issued the planned actions. Their on-screen results are not yet independently verified.")
+                self.say("I issued the planned actions. Their on-screen results are not yet independently verified.", handler="planner")
         except Exception:
             log.exception("Unexpected task execution error")
-            self.say("The task stopped because of an internal action error. See the LYRA log.")
+            self.say("The task stopped because of an internal action error. See the LYRA log.", handler="planner")
         finally:
             self.task_active = False
 
     def _start_planned_task(self, raw):
         if self.task_active:
-            self.say("I am already working on a computer task. Say stop to cancel it.")
+            self.say("I am already working on a computer task. Say stop to cancel it.", handler="planner")
             return
         self.task_executor.reset_stop()
         self.task_active = True
@@ -235,7 +256,7 @@ class Session:
                 target=self._execute_planned_task, args=(raw,), daemon=True,
                 name="lyra-computer-task",
             )
-            self.say("Planning and carrying out the task. Say stop to cancel it.")
+            self.say("Planning and carrying out the task. Say stop to cancel it.", handler="planner")
             self._task_thread.start()
         else:
             self._execute_planned_task(raw)
@@ -244,11 +265,13 @@ class Session:
     # PROCESS ONE COMMAND
     # --------------------------------------------------------
 
-    def process(self, text, raw=None):
+    def process(self, text, raw=None, _heard=None):
         """Process one already-wake-stripped command. Returns True to exit."""
 
         normalized = strip_politeness(normalize(text))
         raw = raw if raw is not None else text
+        heard = _heard if _heard is not None else (raw or text)
+        self.last_heard = heard
 
         if not normalized:
             return False
@@ -256,7 +279,7 @@ class Session:
         # terminate
         if is_terminate(normalized):
             self.stop_active_task()
-            self.say("Going offline. Goodbye.")
+            self.say("Going offline. Goodbye.", handler="session")
             return True
 
         # A wake phrase at the start is an address, not part of the command:
@@ -266,17 +289,17 @@ class Session:
         woke, remainder = strip_wake_word(normalize(text))
         if woke:
             if not remainder:
-                self.say("Yes?")
+                self.say("Yes?", handler="session")
                 return False
-            return self.process(remainder, raw=remainder)
+            return self.process(remainder, raw=remainder, _heard=heard)
 
         if normalized in {"stop", "stop task", "cancel task", "abort task"} and self.task_active:
             self.stop_active_task()
-            self.say("Stopping the active task safely.")
+            self.say("Stopping the active task safely.", handler="session")
             return False
 
         if self.task_active:
-            self.say("I am still working. Say stop to cancel the active task.")
+            self.say("I am still working. Say stop to cancel the active task.", handler="session")
             return False
 
         # pending shutdown/restart confirmations
@@ -284,31 +307,37 @@ class Session:
             return False
 
         if normalized in {"stop", "stop task", "cancel task", "abort task"}:
-            self.say("There is no active computer task.")
+            self.say("There is no active computer task.", handler="session")
             return False
 
         # memory commands (need the Memory instance, not in the skill router)
         reply, confirmation = self._handle_memory(normalized, raw)
+        handler = "memory" if (reply is not None or confirmation is not None) else None
+
+        if reply is None and confirmation is None:
+            # skills (PC control) first. Run-on web patterns like
+            # "open brave and open youtube" are answered directly there —
+            # faster and more predictable than a planner round trip.
+            reply, confirmation, skill_handler = route_with_handler(normalized, raw)
+            if skill_handler is not None:
+                handler = skill_handler
 
         if reply is None and confirmation is None and _looks_like_multistep_computer_task(raw):
             self._start_planned_task(raw)
             return False
 
-        if reply is None and confirmation is None:
-            # skills (PC control)
-            reply, confirmation = route(normalized, raw)
-
         if confirmation is not None:
             self.pending_confirmation = confirmation
-            self.say(confirmation.prompt)
+            self.say(confirmation.prompt,
+                     handler=f"{handler or 'skill'} (confirmation requested)")
             return False
 
         if reply is not None:
-            self.say(reply)
+            self.say(reply, handler=handler or "skill")
             return False
 
         # brain (LLM) — streamed sentence by sentence
-        self.say_stream(self.brain.ask_stream(raw.strip()))
+        self.say_stream(self.brain.ask_stream(raw.strip()), handler="chat model")
 
         return False
 
@@ -446,7 +475,7 @@ def run_voice_mode(session, always_listening):
                     # lightweight mode; it is checked before the normal wake gate.
                     if is_terminate(normalize(wake_transcript)):
                         session.stop_active_task()
-                        session.say("Going offline. Goodbye.")
+                        session.say("Going offline. Goodbye.", handler="session")
                         break
                     if not matched:
                         continue
@@ -463,14 +492,21 @@ def run_voice_mode(session, always_listening):
                     continue
 
                 print(f"You: {correct_name(heard)}")
+                session.last_heard = heard
 
                 normalized = normalize(heard)
 
                 # terminate works in every mode, no wake word needed
                 if is_terminate(normalized):
                     session.stop_active_task()
-                    session.say("Going offline. Goodbye.")
+                    session.say("Going offline. Goodbye.", handler="session")
                     break
+
+                # Filler-only utterances ("Okay.", "hmm...") are dropped
+                # instead of being sent to the chat model — unless a
+                # confirmation is waiting, since then they may matter.
+                if session.pending_confirmation is None and is_filler(normalized):
+                    continue
 
                 # ------------------------------------------------
                 # ROUTE: ALWAYS MODE vs WAKE MODE
@@ -554,6 +590,34 @@ def run_voice_mode(session, always_listening):
 
 
 # ============================================================
+# VOICE TEST  (--voice-test)
+# ============================================================
+
+VOICE_TEST_SENTENCE = (
+    "Hello! This is how Lyra sounds with the current voice and speed."
+)
+
+
+def run_voice_test():
+    """Speak one sample sentence with the current voice and speed."""
+
+    from lyra.voice import Voice
+
+    print(f"Voice: {config.VOICE_MODEL}")
+    print(f"Speed: {config.VOICE_SPEED}x")
+
+    voice = Voice()
+
+    if not voice.ok:
+        print("Lyra's voice is not available — check the log for details.")
+        return 1
+
+    voice.speak(VOICE_TEST_SENTENCE)
+    print("Voice test finished.")
+    return 0
+
+
+# ============================================================
 # AUDIO DEVICE LISTING
 # ============================================================
 
@@ -585,14 +649,20 @@ def main():
                         help="always-listening mode (no wake word)")
     parser.add_argument("--devices", action="store_true",
                         help="list audio output devices and exit")
+    parser.add_argument("--voice-test", action="store_true",
+                        help="speak one sample sentence with the current "
+                             "voice and speed, then exit")
     args = parser.parse_args()
 
     from lyra.logging_setup import configure_logging
-    configure_logging(config.LOG_DIR, config.LOG_LEVEL)
+    configure_logging(config.LOG_DIR, config.LOG_LEVEL, config.CONSOLE_LOG_LEVEL)
 
     if args.devices:
         list_devices()
         return
+
+    if args.voice_test:
+        return run_voice_test()
 
     memory = Memory()
 
@@ -608,4 +678,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

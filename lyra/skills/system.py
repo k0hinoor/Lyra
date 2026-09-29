@@ -158,8 +158,19 @@ def handle(text, raw=None):
     # --------------------------------------------------------
     # TIME
     # --------------------------------------------------------
+    # Conversational fillers ("so", "and", "well") are peeled off by
+    # strip_politeness() before this runs.
 
-    if re.match(r"^(?:what(?:'s| is)? the time|what time is it|time)(?: now| please)?$", text):
+    if re.match(
+        r"^(?:what(?:'s| is)? (?:the )?time"
+        r"|what time is it"
+        r"|(?:please )?tell me the time"
+        r"|(?:the |what is the |whats the )?current time"
+        r"|(?:the |give me the )?time"
+        r"|(?:do you have|have) (?:the )?time"
+        r")(?: right now| now| please| today)?$",
+        text,
+    ):
         now = datetime.datetime.now()
         return "It's " + now.strftime("%I:%M %p").lstrip("0") + "."
 
@@ -376,11 +387,35 @@ def handle(text, raw=None):
     # --------------------------------------------------------
     # PC SLEEP  (needs confirmation)
     # --------------------------------------------------------
+    # "put my PC to sleep", "sleep mode", "put my windows in sleep
+    # mode" — and the common Whisper mishearing "put my windows AND
+    # sleep mode". A bare "sleep" is NOT a PC-sleep request (it is the
+    # assistant's own go-to-sleep phrase), so every form here either
+    # ends in "mode" or spells "to sleep".
 
-    if re.match(
-        r"^(?:put )?(?:the |my )?(?:pc|computer|system|windows|machine)?"
-        r" ?to sleep(?: now)?$", text,
-    ) or text == "sleep pc" or text == "sleep the pc":
+    if (
+        re.match(
+            r"^(?:put |switch |enable |turn on |set )?"
+            r"(?:the |my )?"
+            r"(?:pc|computer|system|windows|machine|laptop)?"
+            r" ?(?:to |in |into |on |and )?"
+            r"sleep ?mode(?:s)?"
+            r"(?: now| please)?$",
+            text,
+        )
+        or re.match(
+            r"^(?:put )?(?:the |my )?(?:pc|computer|system|windows|machine|laptop)?"
+            r" ?to sleep(?: now| please)?$",
+            text,
+        )
+        or re.match(
+            r"^(?:put |switch |set )?(?:the |my )?"
+            r"(?:pc|computer|system|windows|machine|laptop)?"
+            r" (?:in|into|and) sleep(?: mode)?(?: now| please)?$",
+            text,
+        )
+        or text in ("sleep pc", "sleep the pc", "sleep my pc")
+    ):
 
         if not IS_WINDOWS:
             return "That only works on Windows."

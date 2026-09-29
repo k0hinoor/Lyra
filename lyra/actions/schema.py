@@ -27,10 +27,12 @@ class ActionPlan:
     actions: tuple
 
 
+# Required fields per action type.
 _ALLOWED = {
     "open_app": {"type", "app"},
+    "open_url": {"type", "url"},
     "generate_text": {"type", "instruction"},
-    "type_text": {"type", "source"},
+    "type_text": {"type"},
     "press_key": {"type", "key"},
     "hotkey": {"type", "keys"},
     "move_mouse": {"type", "x", "y"},
@@ -39,9 +41,17 @@ _ALLOWED = {
     "drag_drop": {"type", "start_x", "start_y", "end_x", "end_y"},
 }
 
+# Optional fields: allowed but not required (the validator applies extra
+# either/or rules, e.g. type_text needs exactly one of source/text).
+_OPTIONAL_FIELDS = {
+    "open_url": {"browser"},
+    "type_text": {"source", "text"},
+}
+
 # Field order, used to map positional arguments ("move_mouse(10, 20)").
 _FIELD_ORDER = {
     "open_app": ("app",),
+    "open_url": ("url",),
     "generate_text": ("instruction",),
     "type_text": ("source",),
     "press_key": ("key",),
@@ -53,6 +63,33 @@ _FIELD_ORDER = {
 }
 
 _BLOCKED_APPS = {"cmd", "command prompt", "powershell", "terminal"}
+
+_MAX_URL_LENGTH = 2048
+_MAX_TYPED_TEXT_LENGTH = 240
+
+
+def _validate_open_url(url):
+    """http/https only, with a host, no credentials — validated with urllib."""
+    from urllib.parse import urlparse
+
+    if not isinstance(url, str) or not url.strip() or len(url) > _MAX_URL_LENGTH:
+        raise PlanValidationError("open_url needs a non-empty URL string")
+    if any(char.isspace() or ord(char) < 32 for char in url):
+        raise PlanValidationError("open_url URL must not contain whitespace")
+    try:
+        parsed = urlparse(url)
+    except ValueError as exc:
+        raise PlanValidationError(f"open_url URL could not be parsed: {exc}")
+    if parsed.scheme not in ("http", "https"):
+        raise PlanValidationError(
+            "open_url only accepts http:// or https:// URLs, got "
+            + repr(parsed.scheme or "no scheme")
+        )
+    if not parsed.netloc:
+        raise PlanValidationError("open_url URL is missing its host")
+    if "@" in parsed.netloc or parsed.username or parsed.password:
+        raise PlanValidationError("open_url URL must not embed credentials")
+    return url.strip()
 
 
 def validate_plan(value):
@@ -66,6 +103,7 @@ def validate_plan(value):
     checked = []
     has_generated_text = False
     from ..skills.apps import OPEN_APPS
+    from .. import config
     action_safe_apps = set(OPEN_APPS) - _BLOCKED_APPS
     for index, action in enumerate(actions):
         if not isinstance(action, dict) or not isinstance(action.get("type"), str):
@@ -73,7 +111,8 @@ def validate_plan(value):
         action_type = action["type"]
         if action_type not in _ALLOWED:
             raise PlanValidationError(f"Unsupported action type: {action_type}")
-        unknown = set(action) - _ALLOWED[action_type]
+        allowed_fields = _ALLOWED[action_type] | _OPTIONAL_FIELDS.get(action_type, set())
+        unknown = set(action) - allowed_fields
         missing = _ALLOWED[action_type] - set(action)
         if unknown or missing:
             raise PlanValidationError(
@@ -89,6 +128,35 @@ def validate_plan(value):
                 raise PlanValidationError(
                     f"Application is not approved for automated launch: {action['app']}"
                 )
+        elif action_type == "open_url":
+            normalized_action["url"] = _validate_open_url(action["url"])
+            browser = action.get("browser")
+            if browser is not None:
+                canonical = config.normalize_browser_name(browser)
+                if not canonical:
+                    raise PlanValidationError(
+                        f"open_url browser is not supported: {browser!r}"
+                    )
+                normalized_action["browser"] = canonical
+        elif action_type == "type_text":
+            has_source = "source" in action
+            has_text = "text" in action
+            if has_source == has_text:
+                raise PlanValidationError(
+                    f"Action {index + 1} type_text needs exactly one of source or text"
+                )
+            if has_text:
+                literal = action["text"]
+                if (
+                    not isinstance(literal, str)
+                    or not literal.strip()
+                    or len(literal) > _MAX_TYPED_TEXT_LENGTH
+                ):
+                    raise PlanValidationError(
+                        f"Action {index + 1} type_text text must be a short, "
+                        "non-empty string"
+                    )
+                normalized_action["text"] = literal.strip()
         elif action_type == "press_key" and isinstance(action["key"], str):
             normalized_action["key"] = action["key"].strip().lower()
         elif action_type == "hotkey" and isinstance(action["keys"], list):
@@ -98,7 +166,11 @@ def validate_plan(value):
         _validate_values(action_type, normalized_action, index, PRESSABLE_KEYS, HOTKEY_KEYS)
         if action_type == "generate_text":
             has_generated_text = True
-        if action_type == "type_text" and not has_generated_text:
+        if (
+            action_type == "type_text"
+            and action.get("source") == "generated_text"
+            and not has_generated_text
+        ):
             raise PlanValidationError("type_text must follow a generate_text action")
         checked.append(normalized_action)
     return ActionPlan("computer_task", tuple(checked))
@@ -112,7 +184,9 @@ def _validate_values(kind, action, index, pressable_keys, hotkey_keys):
         if not isinstance(value, str) or not value.strip() or len(value) > 240:
             raise PlanValidationError(f"{label} has an invalid {key}")
     elif kind == "type_text":
-        if action["source"] != "generated_text":
+        # The literal "text" form is validated in validate_plan(); the
+        # source form may only ever type text generated in this plan.
+        if "source" in action and action["source"] != "generated_text":
             raise PlanValidationError(f"{label} may only type text generated in this plan")
     elif kind == "press_key":
         if action["key"] not in pressable_keys:
@@ -156,6 +230,7 @@ def plan_json_schema():
     integer = {"type": "integer"}
     fields = {
         "open_app": {"app": string},
+        "open_url": {"url": string},
         "generate_text": {"instruction": string},
         "type_text": {"source": {"type": "string", "enum": ["generated_text"]}},
         "press_key": {"key": {"type": "string", "enum": sorted(PRESSABLE_KEYS)}},
@@ -176,11 +251,21 @@ def plan_json_schema():
         },
         "drag_drop": {"start_x": integer, "start_y": integer, "end_x": integer, "end_y": integer},
     }
+    optional = {
+        "open_url": {
+            "browser": {"type": "string", "enum": ["brave", "chrome", "edge", "firefox"]},
+        },
+        "type_text": {"text": string},
+    }
     variants = [
         {
             "type": "object",
-            "properties": {"type": {"type": "string", "enum": [kind]}, **properties},
-            "required": ["type", *properties],
+            "properties": {
+                "type": {"type": "string", "enum": [kind]},
+                **properties,
+                **optional.get(kind, {}),
+            },
+            "required": sorted(_ALLOWED[kind]),
             "additionalProperties": False,
         }
         for kind, properties in fields.items()
@@ -262,6 +347,10 @@ def _coerce_action(item):
                 action["type"] = action.pop(alias)
                 break
 
+    # {"url": "..."} / {"link": "..."} with no type key is a web action.
+    if "type" not in action and any(key in action for key in ("url", "link", "href")):
+        action["type"] = "open_url"
+
     # {"open_app": {"app": "notepad"}} or {"open_app": "notepad"}.
     if "type" not in action and len(action) == 1:
         (name, argument), = action.items()
@@ -290,8 +379,12 @@ def _coerce_action(item):
             break
 
     if kind == "type_text":
-        # "generated_text" is the only thing type_text may ever type, so any
-        # other field (e.g. inline text) carries nothing usable.
+        # Two shapes: type short user-given text literally, or type what a
+        # generate_text step produced. Coercion only reshapes; the
+        # validator still decides.
+        literal = action.get("text")
+        if isinstance(literal, str) and literal.strip():
+            return {"type": "type_text", "text": literal.strip()}
         return {"type": "type_text", "source": "generated_text"}
 
     fields = _FIELD_ORDER[kind]
@@ -302,6 +395,16 @@ def _coerce_action(item):
 
     if kind == "open_app" and isinstance(action.get("app"), str):
         action["app"] = re.sub(r"\.exe$", "", action["app"].strip(), flags=re.IGNORECASE)
+    if kind == "open_url":
+        # Rebuild around the URL and optional browser, dropping dialect keys.
+        url = action.get("url") or action.get("link") or action.get("href")
+        browser = action.get("browser") or action.get("in") or action.get("using")
+        rebuilt = {"type": "open_url"}
+        if isinstance(url, str) and url.strip():
+            rebuilt["url"] = url.strip()
+        if isinstance(browser, str) and browser.strip():
+            rebuilt["browser"] = browser.strip()
+        return rebuilt
     if kind == "press_key" and isinstance(action.get("key"), str):
         key = action["key"].strip().lower()
         action["key"] = _KEY_SYNONYMS.get(key, key)
