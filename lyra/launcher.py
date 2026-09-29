@@ -128,6 +128,8 @@ def restart_after_update():
     args = [sys.executable, "-m", "lyra.launcher", "--no-update-check", *sys.argv[1:]]
     log.info("Restarting LYRA after update: %s", " ".join(args))
     print("Restarting LYRA with the updated files...")
+    sys.stdout.flush()
+    sys.stderr.flush()
     os.execv(sys.executable, args)
 
 
