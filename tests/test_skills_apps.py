@@ -155,3 +155,75 @@ def test_command_tables_are_well_formed():
         assert key == key.strip().lower(), key
         assert exes, key
         assert all(exe.lower().endswith(".exe") for exe in exes), key
+
+
+# ------------------------------------------------------------
+# TRAILING "and" / "then"  (run-on speech)
+# ------------------------------------------------------------
+
+@pytest.mark.parametrize("text, target", [
+    ("open brave and", "brave"),
+    ("open notepad and then", "notepad"),
+    ("open brave and then", "brave"),
+])
+def test_trailing_conjunctions_are_stripped(started, text, target):
+    reply = apps.handle(text)
+    assert reply == f"Opening {target.title()}."
+    assert started == [target]
+
+
+# ------------------------------------------------------------
+# NEVER REPORT SUCCESS WITHOUT STARTING SOMETHING
+# ------------------------------------------------------------
+
+def test_a_comma_in_the_raw_utterance_still_launches(started):
+    # Whisper transcript kept the comma: "open, breathe and". The
+    # normalized text is clean, but the raw fallback used to fail on
+    # the comma, so nothing started while Lyra said "Opening...".
+    reply = apps.handle("open breathe and", raw="open, breathe and")
+    assert started == ["breathe"], "the app must actually be started"
+    assert reply == "Opening breathe."
+
+
+def test_an_unknown_app_failure_is_reported_not_claimed(monkeypatch):
+    def fail(target):
+        raise FileNotFoundError(f"not found: {target}")
+
+    monkeypatch.setattr(apps, "_start", fail)
+
+    # unknown name, comma in the raw transcript
+    assert apps.handle("open zzzapp and", raw="open, zzzapp and") == (
+        "I couldn't find an app called zzzapp."
+    )
+    # a catalogued app whose launch still fails (e.g. not installed)
+    assert apps.handle("open brave") == "I couldn't find an app called Brave."
+
+
+def test_unknown_app_oserror_is_caught(monkeypatch):
+    monkeypatch.setattr(apps, "_start", lambda target: (_ for _ in ()).throw(OSError("nope")))
+    assert apps.handle("open zzznope") == "I couldn't find an app called zzznope."
+
+
+# ------------------------------------------------------------
+# RUN-ON MULTI-STEP IS FOR THE PLANNER, NOT ONE GIANT APP NAME
+# ------------------------------------------------------------
+
+def test_multistep_open_is_not_treated_as_one_app(started):
+    assert apps.handle("open notepad and write about india") is None
+    assert started == []
+
+
+# ------------------------------------------------------------
+# FULL SCREEN IS NOT AN APP
+# ------------------------------------------------------------
+
+@pytest.mark.parametrize("text", [
+    "exit full screen",
+    "close full screen",
+    "exit fullscreen",
+    "close full screen mode",
+])
+def test_fullscreen_is_not_closed_like_an_app(taskkill, text):
+    fake = taskkill()
+    assert apps.handle(text) is None
+    assert fake.commands == []

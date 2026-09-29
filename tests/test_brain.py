@@ -342,3 +342,96 @@ def test_write_text_raises_instead_of_returning_an_error_sentence(monkeypatch, b
                         lambda *a, **k: FakeResponse(payload={"message": {"content": "  "}}))
     with pytest.raises(RuntimeError):
         brain.write_text("Write about India")
+
+
+# ------------------------------------------------------------
+# THE CHAT MODEL MUST NEVER CLAIM ACTIONS IT CANNOT DO
+# ------------------------------------------------------------
+
+def test_the_prompt_forbids_claiming_actions(brain):
+    prompt = brain._messages("hello")[0]["content"].lower()
+
+    assert "never claim to have done anything" in prompt
+    assert "can't do that one" in prompt
+    assert "not carried out" in prompt
+
+
+def test_the_prompt_says_lyra_cannot_see_the_screen(brain):
+    prompt = brain._messages("hello")[0]["content"].lower()
+
+    assert "cannot see the screen" in prompt
+
+
+def test_the_prompt_no_longer_says_the_chat_model_controls_the_pc(brain):
+    prompt = brain._messages("hello")[0]["content"].lower()
+
+    assert "you operate this computer" not in prompt
+    assert "just say it is done" not in prompt
+
+
+# ------------------------------------------------------------
+# CURRENT DATE/TIME IN EVERY REQUEST
+# ------------------------------------------------------------
+
+import datetime as _datetime  # noqa: E402
+
+
+def test_the_system_prompt_carries_the_current_datetime(brain):
+    real_datetime = _datetime.datetime          # keep the class before patching
+
+    class FixedDatetime:
+        @staticmethod
+        def now():
+            return real_datetime(2026, 9, 29, 15, 45)
+
+    line = brain_module.current_datetime_line(real_datetime(2026, 9, 29, 15, 45))
+    assert line == "Current date and time: Tuesday 29 September 2026, 3:45 PM."
+
+    import lyra.brain as module
+    original = module.datetime.datetime
+    module.datetime.datetime = FixedDatetime
+    try:
+        prompt = brain._messages("hello")[0]["content"]
+    finally:
+        module.datetime.datetime = original
+
+    assert line in prompt
+
+
+def test_the_datetime_is_refreshed_on_every_request(brain):
+    real_datetime = _datetime.datetime          # keep the class before patching
+
+    class MovingDatetime:
+        counter = 0
+
+        @staticmethod
+        def now():
+            MovingDatetime.counter += 1
+            return real_datetime(2026, 9, 29, 10, MovingDatetime.counter)
+
+    import lyra.brain as module
+    original = module.datetime.datetime
+    module.datetime.datetime = MovingDatetime
+    try:
+        first = brain._messages("hello")[0]["content"]
+        second = brain._messages("hello")[0]["content"]
+    finally:
+        module.datetime.datetime = original
+
+    assert "10:01 AM" in first
+    assert "10:02 AM" in second
+
+
+# ------------------------------------------------------------
+# PLANNER KNOWS ABOUT open_url AND LITERAL type_text
+# ------------------------------------------------------------
+
+def test_the_planner_prompt_describes_open_url():
+    prompt = brain_module._planner_instruction("open youtube in brave and search for lofi")
+    assert '{"type": "open_url", "url": "https://...", "browser": BROWSER}' in prompt
+    assert "http:// or https://" in prompt
+
+
+def test_the_planner_prompt_describes_literal_type_text():
+    prompt = brain_module._planner_instruction("open youtube and search for lofi")
+    assert '{"type": "type_text", "text": SHORT_TEXT}' in prompt

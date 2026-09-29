@@ -3,7 +3,9 @@
  SKILL: WEB
 ============================================================
  Websites, Google search, YouTube search, Wikipedia,
- and weather (via wttr.in — no API key needed).
+ weather (via wttr.in), named browsers ("open youtube in
+ brave"), a configurable default browser, and run-on web
+ commands ("open brave and search youtube for lofi").
 ============================================================
 """
 
@@ -13,7 +15,7 @@ from urllib.parse import quote
 
 import requests
 
-from .. import config
+from .. import browsers, config
 
 SITES = {
     "youtube": "https://www.youtube.com",
@@ -50,9 +52,125 @@ _DOMAIN_RE = re.compile(
     r"^[a-z0-9-]+(\.[a-z0-9-]+)*\.(com|net|org|in|io|co|dev|ai|app|gov|edu|me|tv|xyz)$"
 )
 
+# Longest-first so "google chrome" wins over "chrome" at the end of a phrase.
+_BROWSER_TAIL = "|".join(sorted(config.BROWSER_ALIASES, key=len, reverse=True))
+
+_WEB_VERBS = ("open", "go to", "launch", "visit", "search", "play", "find", "look up")
+
 
 def _open(url):
+    """Open a URL in the configured browser, else the system default."""
+
+    name = config.normalize_browser_name(config.BROWSER)
+
+    if name and browsers.launch_browser(name, url):
+        return True
+
     webbrowser.open(url)
+    return True
+
+
+def _youtube_search(query):
+    return (
+        "https://www.youtube.com/results?search_query=" + quote(query),
+        f"Searching YouTube for {query}",
+    )
+
+
+# ------------------------------------------------------------
+# RESOLVE A PLAIN WEB REQUEST  (no browser involved yet)
+# ------------------------------------------------------------
+
+def _resolve(text):
+    """Return (url, reply_prefix) for a web request, or None."""
+
+    # "open youtube and search for lofi" — two steps said in one breath.
+    # Checked BEFORE the generic "youtube ..." branch so the query cannot
+    # swallow the "and search for" part.
+    match = re.match(
+        r"^(?:open |go to )?youtube and (?:search(?: for)?|look up|find|play) (.+)$",
+        text,
+    )
+
+    if match:
+        return _youtube_search(match.group(1).strip())
+
+    match = re.match(r"^(?:play|search|find|look up)(?: for)? (.+?) on youtube$", text)
+
+    if match:
+        return _youtube_search(match.group(1).strip())
+
+    match = re.match(r"^(?:open )?youtube (.+)$", text)
+
+    if match and match.group(1).strip() not in ("settings",):
+        return _youtube_search(match.group(1).strip())
+
+    # "search youtube for lofi beats", "look up youtube for X"
+    match = re.match(
+        r"^(?:play|search|find|look up)(?: on)? youtube(?: for)? (.+)$", text
+    )
+
+    if match:
+        return _youtube_search(match.group(1).strip())
+
+    # --------------------------------------------------------
+    # WIKIPEDIA
+    # --------------------------------------------------------
+
+    match = re.match(r"^(?:wikipedia|wiki) (.+)$", text)
+
+    if match:
+        query = match.group(1).strip()
+        return (
+            "https://en.wikipedia.org/wiki/Special:Search?search=" + quote(query),
+            f"Searching Wikipedia for {query}",
+        )
+
+    # --------------------------------------------------------
+    # GOOGLE SEARCH
+    # --------------------------------------------------------
+
+    match = re.match(r"^(?:search(?: for)?|google|look up|find) (.+)$", text)
+
+    if match:
+        query = match.group(1).strip()
+
+        # "google chrome" should open the app / site, not search the web
+        from . import apps
+
+        if (
+            query in SITES
+            or query in apps.OPEN_APPS
+            or query in apps.OPEN_SETTINGS
+            or query in ("youtube", "wikipedia", "my ip", "my location")
+        ):
+            return None
+
+        return (
+            "https://www.google.com/search?q=" + quote(query),
+            f"Searching for {query}",
+        )
+
+    # --------------------------------------------------------
+    # OPEN WEBSITE
+    # --------------------------------------------------------
+
+    match = re.match(r"^(?:open|go to|launch|visit) (.+)$", text)
+
+    if match:
+        name = match.group(1).strip()
+
+        if name in SITES:
+            return SITES[name], f"Opening {name.title()}"
+
+        # "open google dot com" -> "google.com"
+        domain_text = re.sub(r"\s*dot\s*", ".", name)
+        domain_text = domain_text.replace(" ", "")
+
+        if _DOMAIN_RE.match(domain_text):
+            return "https://" + domain_text, f"Opening {domain_text}"
+
+    return None
 
 
 # ------------------------------------------------------------
@@ -87,6 +205,27 @@ def _weather(city):
 
 
 # ------------------------------------------------------------
+# NAMED-BROWSER HELPERS
+# ------------------------------------------------------------
+
+def _open_in_browser(browser, url, reply_prefix):
+    """Launch the named browser at a URL, with a fallback to the default."""
+
+    pretty = browsers.pretty_name(browser)
+
+    if browsers.launch_browser(browser, url):
+        if url:
+            return f"{reply_prefix} in {pretty}."
+        return f"Opening {pretty}."
+
+    if url:
+        _open(url)
+        return f"I couldn't find {pretty}, so I opened it in your default browser."
+
+    return f"I couldn't find {pretty} on this PC."
+
+
+# ------------------------------------------------------------
 # HANDLE
 # ------------------------------------------------------------
 
@@ -113,87 +252,60 @@ def handle(text, raw=None):
         return _weather(city)
 
     # --------------------------------------------------------
-    # YOUTUBE
+    # MULTI-STEP: "open brave and open youtube",
+    # "open brave and go to youtube",
+    # "open brave and search youtube for lofi"
     # --------------------------------------------------------
 
-    match = re.match(r"^(?:play|search|find|look up)(?: for)? (.+?) on youtube$", text)
-
-    if match:
-        query = match.group(1).strip()
-        _open("https://www.youtube.com/results?search_query=" + quote(query))
-        return f"Searching YouTube for {query}."
-
-    match = re.match(r"^(?:open )?youtube (.+)$", text)
-
-    if match and match.group(1).strip() not in ("settings",):
-        query = match.group(1).strip()
-        _open("https://www.youtube.com/results?search_query=" + quote(query))
-        return f"Searching YouTube for {query}."
-
-    # "search youtube for lofi beats", "look up youtube for X"
     match = re.match(
-        r"^(?:play|search|find|look up)(?: on)? youtube(?: for)? (.+)$", text
+        r"^(?:open|launch|start|run) (" + _BROWSER_TAIL + r") and (.+)$", text
     )
 
     if match:
-        query = match.group(1).strip()
-        _open("https://www.youtube.com/results?search_query=" + quote(query))
-        return f"Searching YouTube for {query}."
+        browser = config.BROWSER_ALIASES[match.group(1)]
+        second = match.group(2).strip()
 
-    # --------------------------------------------------------
-    # WIKIPEDIA
-    # --------------------------------------------------------
+        resolved = _resolve(second)
 
-    match = re.match(r"^(?:wikipedia|wiki) (.+)$", text)
+        if resolved is None and not second.startswith(_WEB_VERBS):
+            # "open brave and youtube" — a bare site name after "and"
+            resolved = _resolve("open " + second)
 
-    if match:
-        query = match.group(1).strip()
-        _open("https://en.wikipedia.org/wiki/Special:Search?search=" + quote(query))
-        return f"Searching Wikipedia for {query}."
-
-    # --------------------------------------------------------
-    # GOOGLE SEARCH
-    # --------------------------------------------------------
-
-    match = re.match(r"^(?:search(?: for)?|google|look up|find) (.+)$", text)
-
-    if match:
-        query = match.group(1).strip()
-
-        # "google chrome" should open the app / site, not search the web
-        from . import apps
-
-        if (
-            query in SITES
-            or query in apps.OPEN_APPS
-            or query in apps.OPEN_SETTINGS
-            or query in ("youtube", "wikipedia", "my ip", "my location")
-        ):
+        if resolved is None and not second.startswith(_WEB_VERBS):
+            # not a web task at all — leave it to the planner / chat
             return None
 
-        _open("https://www.google.com/search?q=" + quote(query))
-        return f"Searching for {query}."
+        url = resolved[0] if resolved else None
+        reply_prefix = resolved[1] if resolved else None
+
+        return _open_in_browser(browser, url, reply_prefix or "Opening")
 
     # --------------------------------------------------------
-    # OPEN WEBSITE
+    # NAMED BROWSER: "open youtube in brave",
+    # "search youtube for lofi in brave", "open gmail in chrome"
     # --------------------------------------------------------
 
-    match = re.match(r"^(?:open|go to|launch|visit) (.+)$", text)
+    match = re.match(r"^(.+) in (" + _BROWSER_TAIL + r")$", text)
 
     if match:
-        name = match.group(1).strip()
+        browser = config.BROWSER_ALIASES[match.group(2)]
+        resolved = _resolve(match.group(1).strip())
 
-        if name in SITES:
-            _open(SITES[name])
-            return f"Opening {name.title()}."
+        if resolved is not None:
+            return _open_in_browser(browser, resolved[0], resolved[1])
 
-        # "open google dot com" -> "google.com"
-        domain_text = re.sub(r"\s*dot\s*", ".", name)
-        domain_text = domain_text.replace(" ", "")
+        # unresolved — leave the whole sentence to the later skills
 
-        if _DOMAIN_RE.match(domain_text):
-            _open("https://" + domain_text)
-            return f"Opening {domain_text}."
+    # --------------------------------------------------------
+    # DEFAULT BROWSER (config.BROWSER, else the Windows default)
+    # --------------------------------------------------------
+
+    resolved = _resolve(text)
+
+    if resolved is not None:
+        url, reply_prefix = resolved
+        _open(url)
+        return reply_prefix + "."
 
     return None
 

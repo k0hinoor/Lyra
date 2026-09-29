@@ -62,25 +62,32 @@ class Ear:
         audio_array = np.frombuffer(raw, dtype=np.int16)
         audio_array = audio_array.astype(np.float32) / 32768.0
 
+        kwargs = dict(
+            language="en",
+            temperature=0.0,
+            beam_size=config.WHISPER_BEAM,
+            vad_filter=True,
+            vad_parameters={
+                "min_silence_duration_ms": 400,
+                "speech_pad_ms": 200,
+            },
+            condition_on_previous_text=False,
+            without_timestamps=True,
+        )
+
+        # Bias Whisper towards Lyra's own vocabulary so "brave" is not
+        # heard as "breathe" and "terminate" not as "terminal".
+        hotwords = getattr(config, "WHISPER_HOTWORDS", "")
+        if hotwords:
+            kwargs["hotwords"] = hotwords
+
         try:
-
-            segments, _info = self.model.transcribe(
-
-                audio_array,
-
-                language="en",
-                temperature=0.0,
-                beam_size=config.WHISPER_BEAM,
-
-                vad_filter=True,
-                vad_parameters={
-                    "min_silence_duration_ms": 400,
-                    "speech_pad_ms": 200,
-                },
-
-                condition_on_previous_text=False,
-                without_timestamps=True,
-            )
+            try:
+                segments, _info = self.model.transcribe(audio_array, **kwargs)
+            except TypeError:
+                # older faster-whisper without hotword support
+                kwargs.pop("hotwords", None)
+                segments, _info = self.model.transcribe(audio_array, **kwargs)
 
             text = " ".join(segment.text for segment in segments)
 

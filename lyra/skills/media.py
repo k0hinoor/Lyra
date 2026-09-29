@@ -622,6 +622,12 @@ def handle(text, raw=None):
     if not text:
         return None
 
+    # "full screen" means the F11 toggle (windows skill) — it used to be
+    # parsed as level "full" of subject "screen" and blast brightness to
+    # 100%. ("full volume" / "full brightness" stay legitimate.)
+    if re.search(r"\bfull ?(?:screen|display)\b", text.lower()):
+        return None
+
     # --------------------------------------------------------
     # VOLUME / BRIGHTNESS  (executed, never explained)
     # --------------------------------------------------------

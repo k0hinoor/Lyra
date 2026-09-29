@@ -261,3 +261,69 @@ def test_split_sentences_keeps_all_the_text():
 
 def test_split_sentences_returns_one_chunk_when_there_is_no_boundary():
     assert split_sentences("no punctuation here") == ["no punctuation here"]
+
+
+# ------------------------------------------------------------
+# SENTENCE-OPENING CONNECTIVES  ("so what time is it")
+# ------------------------------------------------------------
+
+@pytest.mark.parametrize("raw, expected", [
+    ("so what time is it", "what time is it"),
+    ("and what time is it", "what time is it"),
+    ("well what time is it", "what time is it"),
+    ("so open notepad", "open notepad"),
+    ("so tell me the time", "tell me the time"),
+])
+def test_sentence_opening_connectives_are_peeled_off(raw, expected):
+    assert strip_politeness(raw) == expected
+
+
+# ------------------------------------------------------------
+# TERMINATE MISHEARINGS  ("and the terminal execution")
+# ------------------------------------------------------------
+
+@pytest.mark.parametrize("text", [
+    "terminal execution",
+    "the terminal execution",
+    "and terminal execution",
+    "and the terminal execution",
+    "lyra terminal execution",
+    "terminate the execution",
+])
+def test_close_terminate_mishearings_still_exit(text):
+    assert is_terminate(text)
+
+
+@pytest.mark.parametrize("text", [
+    "start the terminal execution of the program",   # a real sentence
+    "the terminal is executing",
+    "terminate",
+])
+def test_ordinary_terminal_sentences_do_not_exit(text):
+    assert not is_terminate(text)
+
+
+# ------------------------------------------------------------
+# FILLER-ONLY UTTERANCES  (voice mode drops these)
+# ------------------------------------------------------------
+
+from lyra.utils import is_filler  # noqa: E402
+
+
+@pytest.mark.parametrize("text", [
+    "okay", "ok", "okay then", "alright", "hmm", "hm", "mm", "mhm",
+    "um", "uh", "er", "erm", "oh", "ah", "huh",
+])
+def test_filler_utterances_are_recognised(text):
+    assert is_filler(text)
+
+
+@pytest.mark.parametrize("text", [
+    "yes", "no", "yeah",          # may answer a pending confirmation
+    "thanks",                     # handled by the thanks path
+    "okay open notepad",          # filler + a real command
+    "what time is it",
+    "",
+])
+def test_commands_and_answers_are_not_filler(text):
+    assert not is_filler(text)

@@ -106,13 +106,30 @@ CLOSE_EXES = {
 _OPEN_RE = re.compile(
     r"^(?:please )?(?:open|launch|start|run)\s+(?:the |my |up )?(.+?)$"
 )
+# The raw (un-normalized) utterance may carry punctuation Whisper kept,
+# e.g. "open, brave and" — tolerate it between the verb and the name so
+# the launch attempt always uses the words the user really said.
 _OPEN_RE_RAW = re.compile(
-    r"^(?:please )?(?:open|launch|start|run)\s+(?:the |my |up )?(.+?)$",
+    r"^(?:please\s+)?(?:open|launch|start|run)[\s,]+(?:the |my |up )?(.+?)$",
     re.IGNORECASE,
 )
 _CLOSE_RE = re.compile(
     r"^(?:please )?(?:close|kill|quit|exit|terminate)\s+(?:the |my )?(.+?)$"
 )
+
+# Trailing conjunctions from run-on speech: "open brave and" -> "brave".
+_TRAILING_CONJUNCTION = re.compile(r"(?:\s+(?:and|then))+$")
+
+# "full screen" is a window state toggled with F11 (windows skill),
+# never an app to close or open.
+_FULLSCREEN_NAMES = {"full screen", "fullscreen", "full screen mode", "fullscreen mode"}
+
+
+def _clean_app_name(name):
+    """Strip polite tails and dangling conjunctions from a spoken app name."""
+    name = re.sub(r"\s+(please|now|for me)$", "", name.strip()).strip()
+    name = _TRAILING_CONJUNCTION.sub("", name).strip()
+    return name
 
 
 def _start(target):
@@ -149,6 +166,9 @@ def handle(text, raw=None):
         if name in ("this window", "the window", "this", "that window", "tab", "this tab", "the tab"):
             return None                      # window control skill handles these
 
+        if name in _FULLSCREEN_NAMES:
+            return None                      # F11 toggle — windows skill owns it
+
         exes = CLOSE_EXES.get(name)
 
         if not exes:
@@ -174,41 +194,59 @@ def handle(text, raw=None):
     if not match:
         return None
 
-    name = re.sub(r"\s+(please|now|for me)$", "", match.group(1)).strip()
+    name = _clean_app_name(match.group(1))
+
+    if not name:
+        return None
+
+    # Run-on speech ("open notepad and write about india") is a multi-step
+    # task for the planner, not one app called "notepad and write...".
+    if " and " in name or " then " in name:
+        return None
+
+    def _open_or_report(target, pretty):
+        """Start the target; never claim success if nothing started."""
+        try:
+            _start(target)
+        except OSError:
+            return f"I couldn't find an app called {pretty}."
+        return f"Opening {pretty}."
 
     # settings pages
     if name in OPEN_SETTINGS:
-        _start(OPEN_SETTINGS[name])
-        return f"Opening {_pretty(name)}."
+        return _open_or_report(OPEN_SETTINGS[name], _pretty(name))
 
     # folders
     if name in OPEN_FOLDERS:
-        _start(OPEN_FOLDERS[name])
-        return f"Opening {name}."
+        return _open_or_report(OPEN_FOLDERS[name], name)
 
     # drive letters: "open c drive"
     drive = re.match(r"^([a-z]) drive$", name)
 
     if drive:
-        _start(drive.group(1).upper() + ":\\")
-        return f"Opening {drive.group(1).upper()} drive."
+        return _open_or_report(
+            drive.group(1).upper() + ":\\", f"{drive.group(1).upper()} drive"
+        )
 
     # known apps
     if name in OPEN_APPS:
-        _start(OPEN_APPS[name])
-        return f"Opening {_pretty(name)}."
+        return _open_or_report(OPEN_APPS[name], _pretty(name))
 
-    # unknown — let Windows try to resolve it (installed apps, searches)
+    # unknown — let Windows try to resolve it (installed apps, searches).
+    # Launch first, report second: never say "Opening..." unless something
+    # was actually started.
     raw_match = _OPEN_RE_RAW.match((raw or text).strip())
 
     if raw_match:
-        raw_name = re.sub(
-            r"\s+(please|now|for me)$", "",
-            raw_match.group(1).strip()
-        )
-        _start(raw_name)
+        display_name = _clean_app_name(raw_match.group(1)) or name
+    else:
+        display_name = name
 
-    return f"Opening {name}."
+    if " and " in display_name or " then " in display_name:
+        return None
+
+    # os.startfile raises FileNotFoundError for names Windows can't open
+    return _open_or_report(display_name, display_name)
 
 
 def name():

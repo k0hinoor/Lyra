@@ -6,7 +6,7 @@
 
 import pytest
 
-from lyra.skills import apps, fun, route, system, typing, web, windows
+from lyra.skills import apps, fun, route, route_with_handler, system, typing, web, windows
 from lyra.skills.base import Confirmation
 
 
@@ -168,3 +168,39 @@ def test_a_broken_skill_does_not_hide_later_skills(monkeypatch, pc):
 
 def test_router_is_quiet_about_skills_that_opt_out(monkeypatch, pc):
     assert route("blah blah") == (None, None)
+
+
+# ------------------------------------------------------------
+# FAILURE LOGGING NAMES THE SKILL
+# ------------------------------------------------------------
+
+def test_a_broken_skill_is_logged_by_its_name(monkeypatch, pc, caplog):
+    import logging
+
+    def boom(text, raw=None):
+        raise RuntimeError("skill exploded")
+
+    monkeypatch.setattr(system, "handle", boom)
+
+    with caplog.at_level(logging.ERROR, logger="lyra.skills"):
+        route("what time is it")
+
+    assert "Skill system failed" in caplog.text
+    assert "function name" not in caplog.text
+
+
+def test_route_with_handler_names_the_skill(pc):
+    reply, confirmation, handler = route_with_handler("open notepad")
+    assert reply == "Opening Notepad."
+    assert handler == "skill:apps"
+
+
+def test_route_with_handler_names_confirmations(pc):
+    reply, confirmation, handler = route_with_handler("shutdown the pc")
+    assert reply is None
+    assert confirmation is not None
+    assert handler == "skill:system"
+
+
+def test_route_with_handler_returns_none_when_nothing_matches(pc):
+    assert route_with_handler("why is the sky blue") == (None, None, None)

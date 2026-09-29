@@ -40,6 +40,9 @@ _LEADING_FILLER = (
     "can you", "could you", "would you", "will you", "do you", "are you",
     "please", "kindly", "just", "right now", "now", "hey", "ok", "okay",
     "yo", "hi", "hello", "um", "uh", "er", "erm", "hmm",
+    # Sentence-opening connectives people say out loud: "so what time is it",
+    # "and what time is it", "well what time is it".
+    "so", "and", "well",
 )
 
 _TRAILING_FILLER = (
@@ -164,6 +167,14 @@ TERMINATE_PHRASES = {
     "terminate execution",
     "lyra terminate execution",
     "terminate execution lyra",
+    "terminate the execution",
+    # Close Whisper mishearings of "terminate execution" ("terminal",
+    # "and the ..."). Kept exact-match so ordinary sentences cannot exit.
+    "terminal execution",
+    "the terminal execution",
+    "and terminal execution",
+    "and the terminal execution",
+    "lyra terminal execution",
     "goodbye lyra",
     "lyra goodbye",
     "bye lyra",
@@ -186,6 +197,22 @@ SLEEP_PHRASES = {
 }
 
 THANKS_PHRASES = {"thanks", "thank you", "thank you lyra", "thanks lyra", "shukriya"}
+
+# Acknowledgements and noises that are not commands. Voice mode drops these
+# instead of sending them to the chat model. Kept small and conservative:
+# "yes" / "no" stay OUT because they may answer a pending confirmation.
+FILLER_UTTERANCES = {
+    "okay", "ok", "okay then", "ok then", "alright", "all right",
+    "hmm", "hm", "mm", "mhm", "mhmm", "huh",
+    "um", "uh", "er", "erm", "oh", "ah", "ooh",
+    "so", "well", "and",        # bare connectives with no content
+    "right then", "fair enough",
+}
+
+
+def is_filler(normalized_text):
+    """True for utterances that carry no command ("Okay.", "hmm", ...)."""
+    return normalized_text.strip() in FILLER_UTTERANCES
 
 
 def is_terminate(normalized_text):

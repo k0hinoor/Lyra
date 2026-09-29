@@ -60,15 +60,24 @@ WHISPER_DEVICE = "cpu"
 WHISPER_COMPUTE = "int8"      # int8 = fast on CPU
 WHISPER_BEAM = 1              # 1 = fastest, plenty accurate for voice commands
 
+# Words Whisper base.en keeps mis-hearing ("brave" -> "breathe",
+# "terminate" -> "terminal"). Passed to faster-whisper as hotwords.
+WHISPER_HOTWORDS = "Lyra Brave Chrome YouTube Notepad terminate execution"
+
 # ------------------------------------------------------------
 # VOICE  (Piper text-to-speech)
 # ------------------------------------------------------------
 
-VOICE_MODEL = "en_US-amy-medium"    # female voice, natural and fast
-# Other good options:  en_US-lessac-high, en_GB-jenny-high, en_US-hattie-medium
+VOICE_MODEL = "en_US-lessac-medium" # default voice; any English Piper voice works
+# Other good options:  en_US-amy-medium, en_US-lessac-high, en_GB-jenny-high,
+#                      en_US-hattie-medium
 
 VOICE_REPO = "https://huggingface.co/rhasspy/piper-voices/resolve/main"
 VOICE_SENTENCE_SILENCE = 0.10       # small natural gap between streamed sentences (sec)
+
+VOICE_SPEED = 1.15                  # speaking speed multiplier (clamped to 0.8-1.5)
+VOICE_SPEED_MIN = 0.8
+VOICE_SPEED_MAX = 1.5
 
 OUTPUT_DEVICE = None                # None = Windows default output.
                                     # Run `python main.py --devices` to list
@@ -122,17 +131,59 @@ WAKE_VOSK_MODEL_DIR = MODELS_DIR / "vosk-model-small-en-us-0.15"
 WAKE_WINDOW_SECONDS = 4.0
 WAKE_FUZZY_MAX_DISTANCE = 2
 LOG_LEVEL = "INFO"
+CONSOLE_LOG_LEVEL = "WARNING"       # console shows only warnings/errors; the
+                                    # log file keeps full INFO detail
 GITHUB_REPOSITORY = "k0hinoor/Lyra"
+
+# Preferred browser for web commands ("brave", "chrome", "edge" or "firefox").
+# Empty string = use the Windows default browser.
+BROWSER = ""
+
+# Canonical browser names accepted in settings/env, with spoken aliases.
+BROWSER_ALIASES = {
+    "brave": "brave",
+    "chrome": "chrome",
+    "google chrome": "chrome",
+    "edge": "edge",
+    "microsoft edge": "edge",
+    "firefox": "firefox",
+    "mozilla firefox": "firefox",
+}
+
+
+def clamp_voice_speed(value):
+    """Parse a speaking-speed multiplier; clamp to the supported range.
+
+    Returns None for values that are not numbers at all.
+    """
+    try:
+        speed = float(value)
+    except (TypeError, ValueError):
+        return None
+    return max(VOICE_SPEED_MIN, min(VOICE_SPEED_MAX, speed))
+
+
+def normalize_browser_name(value):
+    """Canonical browser name, '' for the system default, None if unknown."""
+    if value is None:
+        return None
+    name = str(value).strip().casefold()
+    if not name:
+        return ""
+    return BROWSER_ALIASES.get(name)
 
 _SETTINGS = {
     "OLLAMA_MODEL": "OLLAMA_MODEL",
     "VOICE_MODEL": "VOICE_MODEL",
+    "VOICE_SPEED": "VOICE_SPEED",
+    "BROWSER": "BROWSER",
     "OUTPUT_DEVICE": "OUTPUT_DEVICE",
     "WAKE_FUZZY_MAX_DISTANCE": "WAKE_FUZZY_MAX_DISTANCE",
     "WAKE_WINDOW_SECONDS": "WAKE_WINDOW_SECONDS",
     "WHISPER_MODEL": "WHISPER_MODEL",
     "OLLAMA_URL": "OLLAMA_URL",
     "LOG_LEVEL": "LOG_LEVEL",
+    "CONSOLE_LOG_LEVEL": "CONSOLE_LOG_LEVEL",
 }
 try:
     with SETTINGS_FILE.open("r", encoding="utf-8") as _settings_file:
@@ -153,10 +204,19 @@ try:
                     _value = float(_value)
                     if not 1.0 <= _value <= 8.0:
                         raise ValueError("must be between 1 and 8 seconds")
-                elif _target == "LOG_LEVEL":
+                elif _target in ("LOG_LEVEL", "CONSOLE_LOG_LEVEL"):
                     _value = str(_value).upper()
                     if _value not in {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}:
                         raise ValueError("invalid logging level")
+                elif _target == "VOICE_SPEED":
+                    _value = clamp_voice_speed(_value)
+                    if _value is None:
+                        raise ValueError("must be a number between "
+                                         f"{VOICE_SPEED_MIN} and {VOICE_SPEED_MAX}")
+                elif _target == "BROWSER":
+                    _value = normalize_browser_name(_value)
+                    if _value is None:
+                        raise ValueError("must be brave, chrome, edge, firefox or empty")
                 elif not isinstance(_value, str) or not _value.strip():
                     raise ValueError("must be a non-empty string")
                 globals()[_target] = _value
@@ -184,9 +244,17 @@ for _key, _target in _SETTINGS.items():
                 _value = float(_value)
                 if not 1.0 <= _value <= 8.0:
                     continue
-            elif _target == "LOG_LEVEL":
+            elif _target in ("LOG_LEVEL", "CONSOLE_LOG_LEVEL"):
                 _value = _value.upper()
                 if _value not in {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}:
+                    continue
+            elif _target == "VOICE_SPEED":
+                _value = clamp_voice_speed(_value)
+                if _value is None:
+                    continue
+            elif _target == "BROWSER":
+                _value = normalize_browser_name(_value)
+                if _value is None:
                     continue
             globals()[_target] = _value
         except ValueError:

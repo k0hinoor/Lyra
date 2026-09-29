@@ -61,7 +61,12 @@ def test_key_names_are_normalised_to_lowercase():
 # SMALL-MODEL DIALECTS ARE RESTRUCTURED, NEVER TRUSTED
 # ------------------------------------------------------------
 
-from lyra.actions.schema import _ALLOWED, coerce_plan, plan_json_schema  # noqa: E402
+from lyra.actions.schema import (  # noqa: E402
+    _ALLOWED,
+    _OPTIONAL_FIELDS,
+    coerce_plan,
+    plan_json_schema,
+)
 
 CANONICAL = [
     {"type": "open_app", "app": "notepad"},
@@ -94,7 +99,7 @@ CANONICAL = [
     {"intent": "computer_task", "actions": [
         {"action": "open_app", "app": "Notepad.exe"},
         {"name": "generate_text", "arguments": {"prompt": "Write 20 words about India"}},
-        {"action": "type_text", "text": "India is a country in South Asia."},
+        {"action": "type_text", "source": "generated_text"},
     ]},
     # camelCase names, "steps" instead of "actions", intent left out.
     {"steps": [
@@ -157,6 +162,98 @@ def test_schema_fields_match_the_validator_exactly():
     by_kind = {v["properties"]["type"]["enum"][0]: v for v in variants}
     assert set(by_kind) == set(_ALLOWED)
     for kind, variant in by_kind.items():
-        assert set(variant["properties"]) == _ALLOWED[kind]
+        optional = _OPTIONAL_FIELDS.get(kind, set())
+        assert set(variant["properties"]) == _ALLOWED[kind] | optional
         assert set(variant["required"]) == _ALLOWED[kind]
         assert variant["additionalProperties"] is False
+
+
+# ------------------------------------------------------------
+# OPEN_URL  (safe web actions for the planner)
+# ------------------------------------------------------------
+
+def test_open_url_with_https_is_valid():
+    plan = validate_plan({"intent": "computer_task", "actions": [
+        {"type": "open_url", "url": "https://www.youtube.com"},
+    ]})
+    assert plan.actions[0]["url"] == "https://www.youtube.com"
+
+
+def test_open_url_accepts_an_optional_browser_and_normalises_it():
+    plan = validate_plan({"intent": "computer_task", "actions": [
+        {"type": "open_url", "url": "https://youtube.com", "browser": "Google Chrome"},
+    ]})
+    assert plan.actions[0]["browser"] == "chrome"
+
+
+@pytest.mark.parametrize("url", [
+    "javascript:alert(1)",
+    "file:///C:/Windows/system.ini",
+    "data:text/html,<script>",
+    "ftp://example.com/file",
+    "https://user:pass@example.com",
+    "https://",
+    "not a url",
+    "https://example.com/has space",
+    "",
+])
+def test_open_url_rejects_unsafe_urls(url):
+    with pytest.raises(PlanValidationError):
+        validate_plan({"intent": "computer_task", "actions": [
+            {"type": "open_url", "url": url},
+        ]})
+
+
+def test_open_url_rejects_an_unknown_browser():
+    with pytest.raises(PlanValidationError):
+        validate_plan({"intent": "computer_task", "actions": [
+            {"type": "open_url", "url": "https://example.com", "browser": "netscape"},
+        ]})
+
+
+def test_open_url_dialects_are_coerced():
+    reply = {"actions": [
+        {"link": "https://www.youtube.com", "in": "brave"},
+        "open_url(https://www.google.com)",
+    ]}
+    plan = validate_plan(coerce_plan(reply))
+    assert plan.actions[0] == {"type": "open_url", "url": "https://www.youtube.com",
+                               "browser": "brave"}
+    assert plan.actions[1] == {"type": "open_url", "url": "https://www.google.com"}
+
+
+# ------------------------------------------------------------
+# TYPE_TEXT WITH LITERAL TEXT
+# ------------------------------------------------------------
+
+def test_type_text_accepts_short_literal_text_without_generate_text():
+    plan = validate_plan({"intent": "computer_task", "actions": [
+        {"type": "open_url", "url": "https://www.youtube.com"},
+        {"type": "type_text", "text": "lofi"},
+    ]})
+    assert plan.actions[1]["text"] == "lofi"
+
+
+def test_type_text_needs_exactly_one_of_source_or_text():
+    with pytest.raises(PlanValidationError):
+        validate_plan({"intent": "computer_task", "actions": [
+            {"type": "type_text"},
+        ]})
+    with pytest.raises(PlanValidationError):
+        validate_plan({"intent": "computer_task", "actions": [
+            {"type": "type_text", "source": "generated_text", "text": "lofi"},
+        ]})
+
+
+def test_type_text_literal_is_bounded():
+    with pytest.raises(PlanValidationError):
+        validate_plan({"intent": "computer_task", "actions": [
+            {"type": "type_text", "text": "x" * 500},
+        ]})
+
+
+def test_type_text_literal_survives_coercion():
+    plan = validate_plan(coerce_plan({"actions": [
+        {"action": "type_text", "text": "lofi beats"},
+    ]}))
+    assert plan.actions[0] == {"type": "type_text", "text": "lofi beats"}

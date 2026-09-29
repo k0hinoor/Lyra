@@ -308,3 +308,85 @@ def test_other_commands_are_left_alone(text):
 ])
 def test_settings_requests_are_left_to_the_apps_skill(text):
     assert system.handle(text) is None
+
+
+# ------------------------------------------------------------
+# TIME — EVERY WAY IT IS ASKED
+# ------------------------------------------------------------
+# Bug: "so what is the time right now", "tell me the time" and
+# "current time" fell through to the chat model.
+
+@pytest.mark.parametrize("text", [
+    "what is the time",
+    "what is the time right now",
+    "tell me the time",
+    "please tell me the time",
+    "current time",
+    "the current time",
+    "the time",
+    "time now",
+    "what's the time now",
+    "do you have the time",
+])
+def test_more_time_phrasings(text):
+    reply = system.handle(text)
+    assert reply is not None, f"{text!r} must not fall through to chat"
+    assert reply.startswith("It's ")
+
+
+@pytest.mark.parametrize("text", [
+    "so what time is it",
+    "so what is the time right now",
+    "and what time is it",
+    "well what time is it",
+])
+def test_time_with_a_leading_connective(text):
+    from lyra.utils import normalize, strip_politeness
+
+    stripped = strip_politeness(normalize(text))
+    reply = system.handle(stripped)
+    assert reply is not None, f"{text!r} must reach the time skill"
+    assert reply.startswith("It's ")
+
+
+def test_time_like_chatter_is_not_the_time():
+    assert system.handle("time flies when you are having fun") is None
+    assert system.handle("what is time travel") is None
+
+
+# ------------------------------------------------------------
+# SLEEP MODE  (still needs confirmation)
+# ------------------------------------------------------------
+
+@pytest.mark.parametrize("text", [
+    "sleep mode",
+    "put my pc in sleep mode",
+    "put my windows in sleep mode",
+    "put my windows and sleep mode",      # the common Whisper mishearing
+    "put the computer to sleep",
+    "switch sleep mode",
+    "sleep the pc",
+])
+def test_sleep_mode_phrasings_ask_for_confirmation(shell, text):
+    fake = shell()
+    result = system.handle(text)
+
+    assert isinstance(result, Confirmation), f"{text!r} must ask for sleep"
+    assert "confirm" in result.prompt.lower()
+    assert fake.commands == [], "nothing may run before the user confirms"
+
+    result.action()
+    assert fake.commands[0][0] == "rundll32.exe"
+
+
+@pytest.mark.parametrize("text", [
+    "sleep",              # the assistant's own go-to-sleep phrase
+    "go to sleep",
+    "sleep tight",
+    "put me to sleep",
+])
+def test_bare_sleep_is_not_a_pc_sleep_command(shell, text):
+    fake = shell()
+    result = system.handle(text)
+    assert not isinstance(result, Confirmation)
+    assert fake.commands == []
