@@ -32,13 +32,17 @@ class PlannedBrain:
         return self.plan
 
     def ask_stream(self, _prompt):
-        yield "India is diverse and has many languages."
+        raise AssertionError("task text must come from write_text, not the chat stream")
+
+    def write_text(self, _instruction):
+        return "India is diverse and has many languages."
 
 
 def test_multistep_task_is_planned_and_dispatched_safely(monkeypatch, capfd):
     calls = []
     monkeypatch.setattr(automation, "open_app", lambda app: calls.append(("open", app)))
     monkeypatch.setattr(automation, "type_text", lambda text: calls.append(("type", text)))
+    monkeypatch.setattr(automation, "focus_app_window", lambda app: True)
     plan = validate_plan({"intent": "computer_task", "actions": [
         {"type": "open_app", "app": "notepad"},
         {"type": "generate_text", "instruction": "Write about India"},
@@ -48,8 +52,7 @@ def test_multistep_task_is_planned_and_dispatched_safely(monkeypatch, capfd):
     session = Session(brain, FakeMemory())
     session.process("Open Notepad and write about India")
     assert brain.planned == ["Open Notepad and write about India"]
-    assert calls[0] == ("open", "notepad")
-    assert calls[1][0] == "type"
+    assert calls == [("open", "notepad"), ("type", "India is diverse and has many languages.")]
     assert "not yet independently verified" in capfd.readouterr().out
 
 

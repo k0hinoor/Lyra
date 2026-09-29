@@ -12,11 +12,13 @@
 
 import json
 import logging
+import re
 import threading
 
 import requests
 
-from .actions.schema import PlanValidationError, validate_plan
+from .actions.schema import PlanValidationError, coerce_plan, plan_json_schema, validate_plan
+from .computer.automation import HOTKEY_KEYS, PRESSABLE_KEYS
 
 log = logging.getLogger(__name__)
 
@@ -55,6 +57,74 @@ SYSTEM_PROMPT = (
     "- Do not add unasked advice, encouragement or follow-up topics.\n"
     "- Do not mention memories unless they are directly relevant.\n"
 )
+
+# ------------------------------------------------------------
+# COMPUTER-TASK PLANNING / WRITING PROMPTS
+# ------------------------------------------------------------
+
+# Shown to the model verbatim. A test asserts it passes validate_plan(), so
+# the example can never teach a shape the validator would reject.
+PLAN_EXAMPLE = {
+    "intent": "computer_task",
+    "actions": [
+        {"type": "open_app", "app": "notepad"},
+        {"type": "generate_text", "instruction": "Write a short poem about the rain."},
+        {"type": "type_text", "source": "generated_text"},
+    ],
+}
+
+PLANNER_SYSTEM_PROMPT = "You turn desktop tasks into JSON action plans. Reply with JSON only."
+
+WRITER_SYSTEM_PROMPT = (
+    "You write text that is typed straight into a document on the user's PC. "
+    "Output only the requested text itself: no introduction such as 'Sure' or "
+    "'Here is', no title unless one is asked for, no quotation marks around it, "
+    "and no explanation or closing remark. Follow the requested topic and length."
+)
+
+
+def _planner_instruction(user_text):
+    return (
+        "Turn the user's desktop task into a JSON action plan.\n"
+        'Reply with one JSON object: {"intent": "computer_task", "actions": [...]} '
+        "with 1 to 8 actions, in order.\n"
+        'Every action is an object with a "type" field and exactly these fields:\n'
+        '{"type": "open_app", "app": APP_NAME}\n'
+        '{"type": "generate_text", "instruction": WHAT_TO_WRITE}\n'
+        '{"type": "type_text", "source": "generated_text"}\n'
+        '{"type": "press_key", "key": KEY}\n'
+        '{"type": "hotkey", "keys": [KEY, KEY]}\n'
+        '{"type": "move_mouse", "x": X, "y": Y}\n'
+        '{"type": "click", "button": "left", "clicks": 1}\n'
+        '{"type": "scroll", "direction": "down", "amount": 3}\n'
+        '{"type": "drag_drop", "start_x": X, "start_y": Y, "end_x": X, "end_y": Y}\n'
+        "press_key KEY is one of: " + ", ".join(sorted(PRESSABLE_KEYS)) + ".\n"
+        "hotkey keys come from: " + ", ".join(sorted(HOTKEY_KEYS)) + ".\n"
+        "To write something: open_app, then generate_text, then type_text.\n"
+        "In the generate_text instruction keep the user's own topic and length; "
+        "do not add requirements they did not ask for.\n"
+        "Only use screen coordinates the user gave; never invent them.\n"
+        "Never plan commands, code, URLs, file deletion, power actions, "
+        "messages or emails.\n"
+        "Example task: open notepad and write a short poem about the rain\n"
+        "Example reply: " + json.dumps(PLAN_EXAMPLE) + "\n"
+        "Task: " + user_text
+    )
+
+
+def _clean_written_text(text):
+    """Trim wrapping a model adds despite instructions: code fences, quotes."""
+    text = (text or "").strip()
+    fenced = re.fullmatch(r"```[\w-]*\n?(.*?)\n?```", text, re.DOTALL)
+    if fenced:
+        text = fenced.group(1).strip()
+    for opening, closing in (('"', '"'), ("'", "'"), ("“", "”")):
+        inner = text[1:-1]
+        if len(text) >= 2 and text[0] == opening and text[-1] == closing \
+                and opening not in inner and closing not in inner:
+            text = inner.strip()
+            break
+    return text
 
 
 class Brain:
@@ -109,49 +179,76 @@ class Brain:
 
     def plan_actions(self, user_text):
         """Ask Ollama for a JSON plan; reject malformed or unsafe plans."""
-        instruction = (
-            "Convert the user's desktop task into a JSON action plan. "
-            "Return only an object with intent=computer_task and actions (1-8 items). "
-            "Allowed actions: open_app(app), generate_text(instruction), "
-            "type_text(source=generated_text), press_key(key), hotkey(keys), "
-            "move_mouse(x,y), click(button,clicks), scroll(direction,amount), "
-            "drag_drop(start_x,start_y,end_x,end_y).\n"
-            "For open_app, use a concise application name from the request. "
-            "For writing content: open_app, generate_text with the requested "
-            "content constraints, then type_text with source generated_text. "
-            "Never output commands, code, URLs to execute, file deletion, "
-            "system power actions, messages, emails, or unsupported actions. "
-            "Do not invent coordinates; only use coordinates explicitly supplied. "
-            "User task: " + user_text
-        )
+        payload = {
+            "model": config.OLLAMA_MODEL,
+            "messages": [
+                {"role": "system", "content": PLANNER_SYSTEM_PROMPT},
+                {"role": "user", "content": _planner_instruction(user_text)},
+            ],
+            # Structured outputs: Ollama constrains generation to the plan
+            # schema, so the model cannot invent its own action format.
+            "format": plan_json_schema(),
+            "stream": False,
+            "keep_alive": config.OLLAMA_KEEP_ALIVE,
+            "options": {"temperature": 0, "num_predict": 400},
+        }
+        content = ""
         try:
-            response = requests.post(
-                config.OLLAMA_URL,
-                json={
-                    "model": config.OLLAMA_MODEL,
-                    "messages": [
-                        {"role": "system", "content": "You produce constrained computer action JSON only."},
-                        {"role": "user", "content": instruction},
-                    ],
-                    "format": "json",
-                    "stream": False,
-                    "keep_alive": config.OLLAMA_KEEP_ALIVE,
-                    "options": {"temperature": 0, "num_predict": 300},
-                },
-                timeout=config.OLLAMA_TIMEOUT,
-            )
+            response = requests.post(config.OLLAMA_URL, json=payload, timeout=config.OLLAMA_TIMEOUT)
+            if not response.ok:
+                # Ollama before 0.5 accepts only format="json", not a schema.
+                log.info(
+                    "Ollama refused the plan schema (HTTP %s); retrying in plain JSON mode",
+                    response.status_code,
+                )
+                payload["format"] = "json"
+                response = requests.post(config.OLLAMA_URL, json=payload, timeout=config.OLLAMA_TIMEOUT)
             response.raise_for_status()
             content = response.json().get("message", {}).get("content", "")
             if not isinstance(content, str):
                 raise PlanValidationError("Ollama returned no JSON content")
-            plan = validate_plan(json.loads(content))
-            return plan
+            return validate_plan(coerce_plan(json.loads(content)))
         except (ValueError, PlanValidationError) as exc:
-            log.warning("Rejected malformed computer-action plan: %s", exc)
+            # The raw reply makes the next failure diagnosable from the log.
+            log.warning(
+                "Rejected malformed computer-action plan: %s. Model reply: %.600s",
+                exc, content,
+            )
             return None
         except Exception:
             log.exception("Computer-action planning request failed")
             return None
+
+    # --------------------------------------------------------
+    # WRITE TEXT FOR A COMPUTER TASK
+    # --------------------------------------------------------
+
+    def write_text(self, instruction):
+        """Generate text to type into a document.
+
+        Unlike ask_stream this uses a writing prompt instead of the spoken
+        chat persona, keeps the conversation history untouched, and raises
+        on failure, so an error sentence is never typed into the document.
+        """
+        response = requests.post(
+            config.OLLAMA_URL,
+            json={
+                "model": config.OLLAMA_MODEL,
+                "messages": [
+                    {"role": "system", "content": WRITER_SYSTEM_PROMPT},
+                    {"role": "user", "content": instruction},
+                ],
+                "stream": False,
+                "keep_alive": config.OLLAMA_KEEP_ALIVE,
+                "options": {"temperature": 0.7, "num_predict": 700},
+            },
+            timeout=config.OLLAMA_TIMEOUT,
+        )
+        response.raise_for_status()
+        text = _clean_written_text(response.json().get("message", {}).get("content", ""))
+        if not text:
+            raise RuntimeError("The local model returned no text to type")
+        return text
 
     # --------------------------------------------------------
     # ASK (streaming)

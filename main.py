@@ -205,12 +205,11 @@ class Session:
             if plan is None:
                 self.say("I couldn't create a valid, safe action plan for that task.")
                 return
-            result = self.task_executor.run(
-                plan,
-                generate_text=lambda instruction: " ".join(
-                    self.brain.ask_stream(instruction)
-                ).strip(),
-            )
+            # write_text, not the chat stream: the chat voice adds spoken
+            # preambles, keeps the text in conversation history, and on an
+            # Ollama error yields a fallback sentence that would then be
+            # typed into the document. write_text raises instead.
+            result = self.task_executor.run(plan, generate_text=self.brain.write_text)
             if result.status.value == "FAILURE":
                 failed = next((item for item in result.results if item.status.value == "FAILURE"), None)
                 detail = failed.detail if failed else "An action failed."
@@ -259,6 +258,17 @@ class Session:
             self.stop_active_task()
             self.say("Going offline. Goodbye.")
             return True
+
+        # A wake phrase at the start is an address, not part of the command:
+        # "hey lyra" typed in text mode, or said again during the follow-up
+        # window, used to reach the skills (and the volume skill read it as
+        # "mute"). Checked after terminate so "lyra goodbye" still exits.
+        woke, remainder = strip_wake_word(normalize(text))
+        if woke:
+            if not remainder:
+                self.say("Yes?")
+                return False
+            return self.process(remainder, raw=remainder)
 
         if normalized in {"stop", "stop task", "cancel task", "abort task"} and self.task_active:
             self.stop_active_task()
