@@ -16,6 +16,7 @@ import subprocess
 import time
 
 from .. import config
+from ..messages import hindi_date, hindi_time, is_hindi, t
 from .base import Confirmation
 
 try:
@@ -107,13 +108,13 @@ def _human_duration(seconds):
     parts = []
 
     if days:
-        parts.append(f"{days} day{'s' if days != 1 else ''}")
+        parts.append(t("duration.day" if days == 1 else "duration.days", n=days))
     if hours:
-        parts.append(f"{hours} hour{'s' if hours != 1 else ''}")
+        parts.append(t("duration.hour" if hours == 1 else "duration.hours", n=hours))
     if minutes and not days:
-        parts.append(f"{minutes} minute{'s' if minutes != 1 else ''}")
+        parts.append(t("duration.minute" if minutes == 1 else "duration.minutes", n=minutes))
 
-    return ", ".join(parts) if parts else "less than a minute"
+    return ", ".join(parts) if parts else t("duration.under_minute")
 
 
 def _do_shutdown():
@@ -172,7 +173,9 @@ def handle(text, raw=None):
         text,
     ):
         now = datetime.datetime.now()
-        return "It's " + now.strftime("%I:%M %p").lstrip("0") + "."
+        if is_hindi():
+            return t("system.time", time=hindi_time(now))
+        return t("system.time", time=now.strftime("%I:%M %p").lstrip("0"))
 
     # --------------------------------------------------------
     # DATE / DAY
@@ -184,7 +187,9 @@ def handle(text, raw=None):
         text,
     ):
         now = datetime.datetime.now()
-        return "Today is " + now.strftime("%A, %d %B %Y").lstrip("0") + "."
+        if is_hindi():
+            return t("system.date", date=hindi_date(now))
+        return t("system.date", date=now.strftime("%A, %d %B %Y").lstrip("0"))
 
     # --------------------------------------------------------
     # BATTERY
@@ -193,21 +198,21 @@ def handle(text, raw=None):
     if "battery" in text and re.search(r"\bbattery\b", text):
 
         if not _PSUTIL_OK:
-            return "Battery status needs the psutil package."
+            return t("system.no_psutil_battery")
 
         battery = psutil.sensors_battery()
 
         if battery is None:
-            return "I couldn't find a battery — probably a desktop PC."
+            return t("system.no_battery")
 
         percent = round(battery.percent)
-        state = "charging" if battery.power_plugged else "on battery"
-        reply = f"Battery is at {percent} percent and {state}."
+        state = t("system.charging") if battery.power_plugged else t("system.on_battery")
+        reply = t("system.battery", percent=percent, state=state)
 
         if battery.secsleft not in (
             psutil.POWER_TIME_UNLIMITED, psutil.POWER_TIME_UNKNOWN
         ) and battery.secsleft and battery.secsleft > 0:
-            reply += f" About {_human_duration(battery.secsleft)} left."
+            reply += t("system.battery_left", duration=_human_duration(battery.secsleft))
 
         return reply
 
@@ -224,12 +229,12 @@ def handle(text, raw=None):
         text,
     ):
         if not _PSUTIL_OK:
-            return "System stats need the psutil package."
+            return t("system.no_psutil_stats")
 
         cpu = psutil.cpu_percent(interval=0.4)
         ram = psutil.virtual_memory().percent
 
-        return f"CPU is at {round(cpu)} percent, memory at {round(ram)} percent."
+        return t("system.stats", cpu=round(cpu), ram=round(ram))
 
     # --------------------------------------------------------
     # DISK SPACE
@@ -238,25 +243,25 @@ def handle(text, raw=None):
     if re.search(r"\b(disk space|storage)\b", text):
 
         if not _PSUTIL_OK:
-            return "Disk stats need the psutil package."
+            return t("system.no_psutil_disk")
 
         for root in ("C:/", "/"):
             try:
                 usage = psutil.disk_usage(root)
                 free_gb = round(usage.free / (1024 ** 3))
                 total_gb = round(usage.total / (1024 ** 3))
-                return f"The main drive has {free_gb} gigabytes free, out of {total_gb}."
+                return t("system.disk", free=free_gb, total=total_gb)
             except Exception:
                 continue
 
-        return "I couldn't read the disk usage."
+        return t("system.disk_failed")
 
     # --------------------------------------------------------
     # IP ADDRESS
     # --------------------------------------------------------
 
     if re.search(r"\b(ip address|my ip|ip)\b$", text) or text in ("ip", "my ip"):
-        return f"Your local IP address is {_local_ip().replace('.', ' ')}."
+        return t("system.ip", ip=_local_ip().replace('.', ' '))
 
     # --------------------------------------------------------
     # WI-FI PASSWORD
@@ -267,12 +272,12 @@ def handle(text, raw=None):
         ssid, password = _wifi_password()
 
         if ssid is None:
-            return "I couldn't read the Wi-Fi details. Is Wi-Fi connected?"
+            return t("system.wifi_failed")
 
         if password is None:
-            return f"The network is {ssid}, but the password isn't stored on this PC."
+            return t("system.wifi_no_password", ssid=ssid)
 
-        return f"The password for {ssid} is: {password}."
+        return t("system.wifi_password", ssid=ssid, password=password)
 
     # --------------------------------------------------------
     # UPTIME
@@ -281,10 +286,10 @@ def handle(text, raw=None):
     if re.match(r"^(?:how long have (?:you|we) been (?:on|up)|uptime|system uptime)$", text):
 
         if not _PSUTIL_OK:
-            return "Uptime needs the psutil package."
+            return t("system.no_psutil_uptime")
 
         uptime = time.time() - psutil.boot_time()
-        return f"The system has been up for {_human_duration(uptime)}."
+        return t("system.uptime", duration=_human_duration(uptime))
 
     # --------------------------------------------------------
     # SCREENSHOT
@@ -293,7 +298,7 @@ def handle(text, raw=None):
     if re.match(r"^(?:take )?(?:a )?screen ?shot(?: for me)?(?: of the screen)?(?: now)?$", text):
 
         if not _PYAUTOGUI_OK:
-            return "Screenshots need the pyautogui package."
+            return t("system.no_pyautogui_screenshot")
 
         try:
             config.SCREENSHOT_DIR.mkdir(parents=True, exist_ok=True)
@@ -303,10 +308,10 @@ def handle(text, raw=None):
 
             pyautogui.screenshot(str(path))
 
-            return "Screenshot saved to the Pictures folder."
+            return t("system.screenshot_saved")
         except Exception as e:
             print(f"Screenshot error: {e}")
-            return "I couldn't take the screenshot."
+            return t("system.screenshot_failed")
 
     # --------------------------------------------------------
     # LOCK
@@ -315,13 +320,13 @@ def handle(text, raw=None):
     if re.match(r"^lock(?: my| the)? (?:pc|computer|screen|windows|system)$", text):
 
         if not IS_WINDOWS:
-            return "Locking only works on Windows."
+            return t("system.lock_windows_only")
 
         def _lock():
             ctypes.windll.user32.LockWorkStation()
 
         _lock()
-        return "Locked. See you soon."
+        return t("system.locked")
 
     # --------------------------------------------------------
     # CANCEL SHUTDOWN
@@ -330,13 +335,13 @@ def handle(text, raw=None):
     if re.match(r"^cancel (?:the )?(?:shutdown|restart|turn off)$", text):
 
         if not IS_WINDOWS:
-            return "That only works on Windows."
+            return t("system.windows_only")
 
         result = subprocess.run(["shutdown", "/a"], capture_output=True)
 
         if result.returncode == 0:
-            return "Shutdown cancelled."
-        return "There was no shutdown to cancel."
+            return t("system.shutdown_cancelled")
+        return t("system.no_shutdown")
 
     # --------------------------------------------------------
     # SHUTDOWN  (needs confirmation)
@@ -349,17 +354,12 @@ def handle(text, raw=None):
     ):
 
         if not IS_WINDOWS:
-            return "That only works on Windows."
+            return t("system.windows_only")
 
         return Confirmation(
-            prompt=(
-                f"This will shut down the PC in {config.SHUTDOWN_DELAY} seconds. "
-                "Say confirm to continue, or cancel."
-            ),
+            prompt=t("system.shutdown_prompt", seconds=config.SHUTDOWN_DELAY),
             action=_do_shutdown,
-            say_on_confirm=(
-                f"Shutting down in {config.SHUTDOWN_DELAY} seconds. Goodbye."
-            ),
+            say_on_confirm=t("system.shutdown_confirm", seconds=config.SHUTDOWN_DELAY),
         )
 
     # --------------------------------------------------------
@@ -373,15 +373,12 @@ def handle(text, raw=None):
     ):
 
         if not IS_WINDOWS:
-            return "That only works on Windows."
+            return t("system.windows_only")
 
         return Confirmation(
-            prompt=(
-                f"This will restart the PC in {config.SHUTDOWN_DELAY} seconds. "
-                "Say confirm to continue, or cancel."
-            ),
+            prompt=t("system.restart_prompt", seconds=config.SHUTDOWN_DELAY),
             action=_do_restart,
-            say_on_confirm=f"Restarting in {config.SHUTDOWN_DELAY} seconds.",
+            say_on_confirm=t("system.restart_confirm", seconds=config.SHUTDOWN_DELAY),
         )
 
     # --------------------------------------------------------
@@ -418,12 +415,12 @@ def handle(text, raw=None):
     ):
 
         if not IS_WINDOWS:
-            return "That only works on Windows."
+            return t("system.windows_only")
 
         return Confirmation(
-            prompt="Put the PC to sleep? Say confirm, or cancel.",
+            prompt=t("system.sleep_prompt"),
             action=_do_sleep,
-            say_on_confirm="Sleeping. Goodnight.",
+            say_on_confirm=t("system.sleep_confirm"),
         )
 
     # --------------------------------------------------------
@@ -433,9 +430,9 @@ def handle(text, raw=None):
     if re.match(r"^(?:empty|clear|clean) (?:the )?recycle bin$", text):
 
         return Confirmation(
-            prompt="This will permanently empty the recycle bin. Say confirm, or cancel.",
+            prompt=t("system.recycle_prompt"),
             action=_do_empty_recycle_bin,
-            say_on_confirm="Recycle bin emptied.",
+            say_on_confirm=t("system.recycle_confirm"),
         )
 
     return None

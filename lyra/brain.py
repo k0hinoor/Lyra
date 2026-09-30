@@ -26,9 +26,37 @@ log = logging.getLogger(__name__)
 from . import config
 from .utils import SentenceSplitter
 
+from .messages import t
+
+# English text kept as a module constant (tests and callers compare to it);
+# ask_stream speaks the catalog version, which is Hindi in SPEECH_LANGUAGE="hi".
 CONNECTION_FALLBACK = (
     "I can't reach my local brain. "
     "Is Ollama running?"
+)
+
+# Appended to the system prompt only when SPEECH_LANGUAGE is "hi". The base
+# prompt stays untouched so "auto" and "en" behave exactly as before. It
+# sits at the very end of the system message: small local models follow
+# the most recent instruction best.
+HINDI_MODE_PROMPT = (
+    "\nLANGUAGE MODE: HINDI. This overrides every earlier language instruction.\n"
+    "- Always reply in Hindi written in Devanagari, even when the user, the "
+    "transcript or the question is in English. Never reply with an English "
+    "sentence. English words may appear only as names (YouTube, Notepad, Wi-Fi) "
+    "inside a Hindi sentence.\n"
+    "- Use simple everyday spoken Hindi, the way people talk at home. No "
+    "Sanskrit-heavy, literary or formal essay Hindi: say 'मदद' not 'सहायता', "
+    "'सवाल' not 'प्रश्न', 'शुरू' not 'प्रारंभ', 'लेकिन' or 'पर' not 'परंतु'.\n"
+    "- You are female. Every first-person verb is feminine: 'मैं बता सकती हूँ', "
+    "'मैं करूँगी', 'मैं समझ गई' — never 'सकता', 'करूँगा' or 'समझ गया'.\n"
+    "- Keep it short: one to three short sentences, one idea each. If the "
+    "natural Hindi word is unclear, keep the familiar English word inside the "
+    "Hindi sentence instead of inventing a Hindi word.\n"
+    "- Never invent brand, product, app or website names; use the user's own "
+    "words. If the request is unclear or sounds garbled, do not improvise an "
+    "answer: say so briefly and ask them to repeat, for example "
+    "'माफ़ कीजिए, मैं ठीक से समझ नहीं पाई। एक बार फिर बोलिए?'\n"
 )
 
 SYSTEM_PROMPT = (
@@ -223,6 +251,8 @@ class Brain:
             system += "\nNew preferences successfully saved locally on THIS turn: " + json.dumps(saved, ensure_ascii=False) + "\n"
         else:
             system += "\nNo NEW preference was saved on this turn. You may recall existing saved facts, but do not claim a new save.\n"
+        if getattr(config, "SPEECH_LANGUAGE", "auto") == "hi":
+            system += HINDI_MODE_PROMPT
 
         messages = [{"role": "system", "content": system}]
         messages.extend(self.history[-config.HISTORY_MESSAGES:])
@@ -375,4 +405,4 @@ class Brain:
             log.exception("Ollama streaming request failed")
 
             if not spoke_anything:
-                yield CONNECTION_FALLBACK
+                yield t("brain.offline")

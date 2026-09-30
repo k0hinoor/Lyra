@@ -13,8 +13,11 @@ log = logging.getLogger(__name__)
 VOSK_LANGUAGE = "en"
 
 #: One wake-gate decision, with everything the debug line prints.
+#: ``passes`` holds every Whisper decoding pass of the clip (language, text,
+#: matched) when the transcriber reports them; empty for Vosk.
 WakeAssessment = collections.namedtuple(
-    "WakeAssessment", "matched remainder transcript engine language"
+    "WakeAssessment", "matched remainder transcript engine language passes",
+    defaults=((),),
 )
 
 
@@ -31,7 +34,23 @@ def model_missing_hint(model_dir=None):
 
 
 def format_wake_debug(assessment):
-    """One line per wake-gate clip, printed when WAKE_DEBUG / --debug-wake is on."""
+    """The wake-debug output for one clip (WAKE_DEBUG / --debug-wake).
+
+    One line per clip. When the clip needed several Whisper passes (Hindi
+    then English in SPEECH_LANGUAGE="hi", or English then auto-detect), one
+    line per pass, numbered, so the line that says WAKE names the pass that
+    matched. Every ``lang=`` is the language of the text on the same line.
+    """
+
+    passes = tuple(assessment.passes or ())
+    if len(passes) > 1:
+        return "\n".join(
+            f"[wake-debug] engine={assessment.engine} pass={number}/{len(passes)} "
+            f"lang={getattr(item, 'language', None) or 'unknown'} "
+            f"heard='{getattr(item, 'text', '')}' -> "
+            f"{'WAKE' if getattr(item, 'matched', False) else 'no wake'}"
+            for number, item in enumerate(passes, 1)
+        )
 
     verdict = "WAKE" if assessment.matched else "no wake"
     return (
@@ -44,9 +63,21 @@ def format_wake_debug(assessment):
 def _transcriber_language(transcriber):
     """Language the fallback transcriber reported for the clip it just read."""
 
+    return getattr(_transcriber_owner(transcriber), "last_language", None) or "unknown"
+
+
+def _transcriber_owner(transcriber):
     owner = getattr(transcriber, "__self__", None)   # bound method -> owning Ear
-    source = owner if owner is not None else transcriber
-    return getattr(source, "last_language", None) or "unknown"
+    return owner if owner is not None else transcriber
+
+
+def _transcriber_passes(transcriber):
+    """Every decoding pass the fallback transcriber ran for the last clip."""
+
+    passes = getattr(_transcriber_owner(transcriber), "last_wake_passes", None)
+    if not isinstance(passes, (list, tuple)):
+        return ()
+    return tuple(passes)
 
 
 class WakeWordDetector:
@@ -125,6 +156,7 @@ class WakeWordDetector:
         return WakeAssessment(
             matched, remainder, transcript, "whisper",
             _transcriber_language(fallback_transcriber),
+            _transcriber_passes(fallback_transcriber) if fallback_transcriber else (),
         )
 
     def _recognize_vosk(self, audio_data):

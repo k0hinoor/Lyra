@@ -316,3 +316,80 @@ def test_the_settings_example_documents_the_new_keys():
     assert example["INPUT_DEVICE"] is None
     assert example["WAKE_DEBUG"] is False
     assert example["ENERGY_THRESHOLD_MAX"] == 1000
+
+
+# ------------------------------------------------------------
+# SPEECH_LANGUAGE  (Hindi in, Hindi out)
+# ------------------------------------------------------------
+
+def test_the_shipped_speech_language_is_hindi():
+    # conftest pins "auto" for the suite; the shipped value is read from source.
+    source = (config.BASE_DIR / "lyra" / "config.py").read_text(encoding="utf-8")
+    assert '\nSPEECH_LANGUAGE = "hi"\n' in source
+
+
+@pytest.mark.parametrize("value, expected", [
+    ("auto", "auto"), ("en", "en"), ("hi", "hi"), ("HI", "hi"), (" Hindi ", "hi"),
+])
+def test_speech_language_values_are_normalized(value, expected):
+    assert config._parse_setting("SPEECH_LANGUAGE", value) == expected
+
+
+@pytest.mark.parametrize("value", ["es", "", "hinglish", None, 3])
+def test_an_invalid_speech_language_is_rejected(value):
+    with pytest.raises(ValueError):
+        config._parse_setting("SPEECH_LANGUAGE", value)
+
+
+@pytest.mark.parametrize("speech, whisper, expected", [
+    ("hi", "auto", "hi"), ("hi", "en", "hi"), ("en", "auto", "en"), ("en", "hi", "en"),
+    ("auto", "auto", "auto"), ("auto", "hi", "hi"), ("auto", "en", "en"),
+])
+def test_speech_language_pins_recognition_and_auto_defers_to_whisper_language(
+        monkeypatch, speech, whisper, expected):
+    monkeypatch.setattr(config, "SPEECH_LANGUAGE", speech)
+    monkeypatch.setattr(config, "WHISPER_LANGUAGE", whisper)
+    assert config.stt_language() == expected
+
+
+def test_speech_language_reaches_the_runtime_from_json_and_environment(tmp_path):
+    (tmp_path / "settings.json").write_text(json.dumps({"SPEECH_LANGUAGE": "en"}))
+    environment = {key: value for key, value in os.environ.items() if not key.startswith("LYRA_")}
+    environment["LYRA_DATA_DIR"] = str(tmp_path)
+    script = "from lyra import config; print(config.SPEECH_LANGUAGE)"
+    from_json = subprocess.run([sys.executable, "-c", script], capture_output=True,
+                               text=True, env=environment, check=True)
+    assert from_json.stdout.strip() == "en"
+
+    environment["LYRA_SPEECH_LANGUAGE"] = "auto"
+    from_env = subprocess.run([sys.executable, "-c", script], capture_output=True,
+                              text=True, env=environment, check=True)
+    assert from_env.stdout.strip() == "auto"
+
+    environment["LYRA_SPEECH_LANGUAGE"] = "klingon"
+    invalid = subprocess.run([sys.executable, "-c", script], capture_output=True,
+                             text=True, env=environment, check=True)
+    assert invalid.stdout.strip() == "en"          # invalid override ignored, JSON kept
+
+
+def test_the_wake_hotwords_are_english_only():
+    assert config.WHISPER_WAKE_HOTWORDS == "Hey Lyra Laira Lira Laura Leyra Leira Lyrah"
+    assert all(ord(char) < 128 for char in config.WHISPER_WAKE_HOTWORDS)
+
+
+def test_the_hindi_hotwords_are_short_and_devanagari():
+    words = config.WHISPER_HINDI_HOTWORDS.split()
+    assert 10 <= len(words) <= 40                  # auditable; long lists echo back
+    for word in ("खोलो", "बंद", "बजाओ", "बढ़ाओ", "आवाज़", "यूट्यूब", "नोटपैड"):
+        assert word in words
+
+
+def test_the_settings_example_documents_the_language_keys():
+    example = json.loads(
+        (config.BASE_DIR / "config" / "settings.example.json").read_text(encoding="utf-8")
+    )
+    assert example["SPEECH_LANGUAGE"] == "hi"
+    assert example["WHISPER_WAKE_HOTWORDS"] == config.WHISPER_WAKE_HOTWORDS
+    assert example["WHISPER_HINDI_HOTWORDS"] == config.WHISPER_HINDI_HOTWORDS
+    for key in ("SPEECH_LANGUAGE", "WHISPER_WAKE_HOTWORDS", "WHISPER_HINDI_HOTWORDS"):
+        assert key in config._SETTINGS

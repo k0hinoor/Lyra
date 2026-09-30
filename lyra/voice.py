@@ -127,7 +127,15 @@ def ensure_voice_pack(model=None):
 
 class Voice:
 
-    def __init__(self, language="en"):
+    def __init__(self, language=None):
+
+        # SPEECH_LANGUAGE="hi": every reply is Hindi, so the Hindi pack is the
+        # primary voice and every sentence goes to it — even one holding a
+        # Latin name such as "Ollama" or "YouTube", which the per-sentence
+        # detector would otherwise hand to the English pack mid-reply.
+        if language is None:
+            language = "hi" if getattr(config, "SPEECH_LANGUAGE", "auto") == "hi" else "en"
+        self._force_hindi = language == "hi" and getattr(config, "SPEECH_LANGUAGE", "auto") == "hi"
 
         if language not in {"en", "hi"}:
             raise ValueError("Voice language must be en or hi")
@@ -175,6 +183,12 @@ class Voice:
 
         except Exception:
             log.exception("Piper voice load failed")
+            if language == "hi":
+                print(
+                    f"Could not load the Hindi voice ({self._primary_model}). "
+                    "Run python -m lyra.setup_voice --language hi, then restart LYRA. "
+                    "Text replies are still available."
+                )
             print("Lyra will run without speech.")
 
     # --------------------------------------------------------
@@ -206,7 +220,7 @@ class Voice:
 
     def _piper_for_text(self, text):
         """Lazy-load each language once; never send Hindi to an English pack."""
-        language = speech_language(text)
+        language = "hi" if self._force_hindi else speech_language(text)
         model = self._models[language]
         if model == self._primary_model:
             return self.piper

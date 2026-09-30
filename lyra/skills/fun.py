@@ -9,6 +9,8 @@
 import random
 import re
 
+from ..messages import is_hindi, t
+
 JOKES = [
     "Why do programmers prefer dark mode? Because light attracts bugs.",
     "I told my computer I needed a break, and now it won't stop sending me KitKat ads.",
@@ -59,8 +61,21 @@ EXPLANATIONS = {
 }
 
 
+# Hindi mode: short, clean jokes that work in Hindi without an explanation.
+HINDI_JOKES = [
+    "कंप्यूटर को ठंड क्यों लगी? क्योंकि उसकी विंडो खुली रह गई थी।",
+    "मैंने फ़ोन से कहा कि मुझे थोड़ा आराम चाहिए, तो उसकी बैटरी ही लो हो गई।",
+    "वाई-फ़ाई और मुझमें एक बात एक जैसी है, दोनों तभी गायब होते हैं जब सबको सबसे ज़्यादा ज़रूरत हो।",
+    "टीचर ने पूछा, सबसे ज़्यादा बर्फ़ कहाँ मिलती है? बच्चा बोला, हमारे फ्रिज में, मैडम!",
+    "डॉक्टर ने कहा, आपको आराम चाहिए। मरीज़ बोला, पर मैं तो रोज़ ऑफ़िस में ही आराम करता हूँ!",
+]
+
+
 def _joke():
     """The punchline, then the pun in plain words."""
+
+    if is_hindi():
+        return random.choice(HINDI_JOKES)
 
     joke = random.choice(JOKES)
     explanation = EXPLANATIONS.get(joke)
@@ -90,7 +105,7 @@ def handle(text, raw=None):
     # --------------------------------------------------------
 
     if re.match(r"^(?:flip|toss)(?: a| the)? coin$", text):
-        return random.choice(["Heads.", "Tails."])
+        return random.choice([t("fun.heads"), t("fun.tails")])
 
     # --------------------------------------------------------
     # DICE
@@ -103,8 +118,8 @@ def handle(text, raw=None):
         rolls = [str(random.randint(1, 6)) for _ in range(min(times, 10))]
 
         if len(rolls) == 1:
-            return f"It's a {rolls[0]}."
-        return "You rolled " + ", ".join(rolls) + "."
+            return t("fun.die", n=rolls[0])
+        return t("fun.rolled", rolls=", ".join(rolls))
 
     # --------------------------------------------------------
     # RANDOM NUMBER
@@ -123,7 +138,7 @@ def handle(text, raw=None):
         if low > high:
             low, high = high, low
 
-        return f"Your number is {random.randint(low, high)}."
+        return t("fun.number", n=random.randint(low, high))
 
     return None
 

@@ -293,26 +293,66 @@ FILLER_UTTERANCES = {
 }
 
 
+# Devanagari forms of the phrases above, honoured only when SPEECH_LANGUAGE is
+# "hi" (Whisper writes Hindi speech in Devanagari once it decodes Hindi).
+# Kept exact-match, like the English sets.
+HINDI_TERMINATE_PHRASES = {
+    "लायरा अलविदा", "अलविदा लायरा", "लायरा बंद हो जाओ",
+}
+# "terminate execution" said in hi mode comes back transliterated, in many
+# spellings: "टर्मिनेट एक्जीक्यूशन", "टर्मिनेट एग्जीक्यूशन", ...
+_HINDI_TERMINATE_RE = re.compile(r"^(?:लायरा )?टर्मिनेट (?:एक्ज|एग्ज|एक्स|एक्सि|एक्जि)\S*(?: लायरा)?$")
+
+HINDI_SLEEP_PHRASES = {
+    "सो जाओ", "जाओ सो जाओ", "अब सो जाओ", "बस इतना ही", "कुछ नहीं",
+}
+
+HINDI_THANKS_PHRASES = {
+    "धन्यवाद", "शुक्रिया", "थैंक यू", "धन्यवाद लायरा", "शुक्रिया लायरा",
+    "बहुत धन्यवाद", "बहुत शुक्रिया",
+}
+
+HINDI_STOP_SPEECH_PHRASES = {
+    "रुको", "रुक जाओ", "चुप", "चुप रहो", "चुप हो जाओ", "बस", "बस करो", "स्टॉप",
+    "लायरा रुको", "लायरा चुप",
+}
+
+
+def _hindi_mode():
+    return getattr(config, "SPEECH_LANGUAGE", "auto") == "hi"
+
+
 def is_filler(normalized_text):
     """True for utterances that carry no command ("Okay.", "hmm", ...)."""
     return normalized_text.strip() in FILLER_UTTERANCES
 
 
 def is_terminate(normalized_text):
-    return normalized_text in TERMINATE_PHRASES
+    if normalized_text in TERMINATE_PHRASES:
+        return True
+    return _hindi_mode() and (
+        normalized_text in HINDI_TERMINATE_PHRASES
+        or bool(_HINDI_TERMINATE_RE.match(normalized_text))
+    )
 
 
 def is_sleep(normalized_text):
-    return normalized_text in SLEEP_PHRASES
+    if normalized_text in SLEEP_PHRASES:
+        return True
+    return _hindi_mode() and normalized_text in HINDI_SLEEP_PHRASES
 
 
 def is_thanks(normalized_text):
-    return normalized_text in THANKS_PHRASES
+    if normalized_text in THANKS_PHRASES:
+        return True
+    return _hindi_mode() and normalized_text in HINDI_THANKS_PHRASES
 
 
 def is_stop_speech(normalized_text):
     """True for "stop", "be quiet", "shut up" — said over LYRA's speech."""
-    return normalized_text.strip() in STOP_SPEECH_PHRASES
+    if normalized_text.strip() in STOP_SPEECH_PHRASES:
+        return True
+    return _hindi_mode() and normalized_text.strip() in HINDI_STOP_SPEECH_PHRASES
 
 
 # ------------------------------------------------------------

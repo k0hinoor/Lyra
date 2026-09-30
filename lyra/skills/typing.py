@@ -8,6 +8,8 @@
 
 import re
 
+from ..messages import t
+
 try:
     import pyautogui
     pyautogui.PAUSE = 0
@@ -121,13 +123,13 @@ def handle(text, raw=None):
         content = match.group(1).strip()
 
         if not _PYPERCLIP_OK or not _PYAUTOGUI_OK:
-            return "Typing needs the pyautogui and pyperclip packages."
+            return t("typing.no_packages")
 
         # clipboard-paste = instant and supports every character
         pyperclip.copy(content)
         pyautogui.hotkey("ctrl", "v")
 
-        return "Typed."
+        return t("typing.typed")
 
     # --------------------------------------------------------
     # PRESS KEY(S)
@@ -137,7 +139,7 @@ def handle(text, raw=None):
 
     if match:
         if not _PYAUTOGUI_OK:
-            return "Key control needs the pyautogui package."
+            return t("typing.no_pyautogui")
 
         phrase = match.group(1).strip()
         phrase = _LEADING_ARTICLE.sub("", phrase)
@@ -149,7 +151,7 @@ def handle(text, raw=None):
         combo, unknown = _parse_keys(phrase)
 
         if unknown is not None:
-            return f"I don't know the {unknown} key."
+            return t("typing.unknown_key", key=unknown)
 
         if not combo:
             return None
@@ -159,7 +161,7 @@ def handle(text, raw=None):
         else:
             pyautogui.hotkey(*combo)
 
-        return "Done."
+        return t("session.done")
 
     # --------------------------------------------------------
     # SHORTCUTS  (copy / paste / save ...)
@@ -170,7 +172,7 @@ def handle(text, raw=None):
 
     if text in SHORTCUTS:
         _do_hotkey(SHORTCUTS[text])
-        return "Done."
+        return t("session.done")
 
     # --------------------------------------------------------
     # CLIPBOARD
@@ -183,34 +185,34 @@ def handle(text, raw=None):
 
         if content in ("this", "it", "that", "selection"):
             if not _PYAUTOGUI_OK:
-                return "Key control needs the pyautogui package."
+                return t("typing.no_pyautogui")
             _do_hotkey(("ctrl", "c"))
-            return "Copied."
+            return t("typing.copied")
 
         if not _PYPERCLIP_OK:
-            return "Clipboard needs the pyperclip package."
+            return t("typing.no_pyperclip")
 
         pyperclip.copy(content)
-        return "Copied to clipboard."
+        return t("typing.copied_to_clipboard")
 
     if re.match(r"^(?:read|show)(?: me)? (?:the |my )?clipboard$", text) \
             or re.match(r"^what(?:'s| is) in (?:the |my )?clipboard$", text):
         if not _PYPERCLIP_OK:
-            return "Clipboard needs the pyperclip package."
+            return t("typing.no_pyperclip")
 
         content = (pyperclip.paste() or "").strip()
 
         if not content:
-            return "The clipboard is empty."
+            return t("typing.clipboard_empty")
 
-        return "Clipboard says: " + content[:250]
+        return t("typing.clipboard_says", content=content[:250])
 
     if re.match(r"^clear (?:the |my )?clipboard$", text):
         if not _PYPERCLIP_OK:
-            return "Clipboard needs the pyperclip package."
+            return t("typing.no_pyperclip")
 
         pyperclip.copy("")
-        return "Clipboard cleared."
+        return t("typing.clipboard_cleared")
 
     return None
 

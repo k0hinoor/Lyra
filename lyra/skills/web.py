@@ -16,6 +16,7 @@ from urllib.parse import quote
 import requests
 
 from .. import browsers, config
+from ..messages import is_hindi, spoken_name, t
 
 SITES = {
     "youtube": "https://www.youtube.com",
@@ -73,7 +74,7 @@ def _open(url):
 def _youtube_search(query):
     return (
         "https://www.youtube.com/results?search_query=" + quote(query),
-        f"Searching YouTube for {query}",
+        t("web.search_youtube", query=query),
     )
 
 
@@ -123,7 +124,7 @@ def _resolve(text):
         query = match.group(1).strip()
         return (
             "https://en.wikipedia.org/wiki/Special:Search?search=" + quote(query),
-            f"Searching Wikipedia for {query}",
+            t("web.search_wikipedia", query=query),
         )
 
     # --------------------------------------------------------
@@ -148,7 +149,7 @@ def _resolve(text):
 
         return (
             "https://www.google.com/search?q=" + quote(query),
-            f"Searching for {query}",
+            t("web.search", query=query),
         )
 
     # --------------------------------------------------------
@@ -161,14 +162,14 @@ def _resolve(text):
         name = match.group(1).strip()
 
         if name in SITES:
-            return SITES[name], f"Opening {name.title()}"
+            return SITES[name], t("web.opening", name=spoken_name(name.title()))
 
         # "open google dot com" -> "google.com"
         domain_text = re.sub(r"\s*dot\s*", ".", name)
         domain_text = domain_text.replace(" ", "")
 
         if _DOMAIN_RE.match(domain_text):
-            return "https://" + domain_text, f"Opening {domain_text}"
+            return "https://" + domain_text, t("web.opening", name=domain_text)
 
     return None
 
@@ -182,7 +183,7 @@ def _weather(city):
     try:
 
         response = requests.get(
-            f"https://wttr.in/{quote(city)}?format=j1",
+            f"https://wttr.in/{quote(city)}?format=j1" + ("&lang=hi" if is_hindi() else ""),
             timeout=8,
             headers={"User-Agent": "lyra"},
         )
@@ -193,15 +194,18 @@ def _weather(city):
         temp = current["temp_C"]
         feels = current["FeelsLikeC"]
         desc = current["weatherDesc"][0]["value"].strip()
+        if is_hindi() and current.get("lang_hi"):
+            # wttr.in translates the description when asked for lang=hi.
+            desc = current["lang_hi"][0]["value"].strip() or desc
         humidity = current["humidity"]
 
-        return (
-            f"{city.title()}: {desc}, {temp} degrees, "
-            f"feels like {feels}. Humidity {humidity} percent."
+        return t(
+            "web.weather", city=city.title(), desc=desc, temp=temp,
+            feels=feels, humidity=humidity,
         )
 
     except Exception:
-        return f"I couldn't fetch the weather for {city.title()} right now."
+        return t("web.weather_failed", city=city.title())
 
 
 # ------------------------------------------------------------
@@ -211,18 +215,18 @@ def _weather(city):
 def _open_in_browser(browser, url, reply_prefix):
     """Launch the named browser at a URL, with a fallback to the default."""
 
-    pretty = browsers.pretty_name(browser)
+    pretty = spoken_name(browsers.pretty_name(browser))
 
     if browsers.launch_browser(browser, url):
         if url:
-            return f"{reply_prefix} in {pretty}."
-        return f"Opening {pretty}."
+            return t("web.reply_in_browser", action=reply_prefix, browser=pretty)
+        return t("web.opening_browser", browser=pretty)
 
     if url:
         _open(url)
-        return f"I couldn't find {pretty}, so I opened it in your default browser."
+        return t("web.browser_fallback", browser=pretty)
 
-    return f"I couldn't find {pretty} on this PC."
+    return t("web.browser_missing", browser=pretty)
 
 
 # ------------------------------------------------------------
@@ -305,7 +309,7 @@ def handle(text, raw=None):
     if resolved is not None:
         url, reply_prefix = resolved
         _open(url)
-        return reply_prefix + "."
+        return t("web.reply", action=reply_prefix)
 
     return None
 

@@ -30,7 +30,9 @@ import time
 
 import numpy as np
 
-from lyra import config
+from lyra import config, hindi
+from lyra.messages import current_language, t, t_in
+from lyra.messages import matches as message_matches
 from lyra.memory import Memory
 from lyra.preferences import extract_preferences, is_taste_conversation
 from lyra.skills import Confirmation, apps, route_with_handler
@@ -54,10 +56,8 @@ from lyra.utils import (
 
 log = logging.getLogger(__name__)
 
-# What the apps skill says when a name could not be launched, and the
-# follow-up that repairs it: "no, I meant Notepad".
-_APP_NOT_FOUND_PREFIX = "I couldn't find an app called"
-
+# The follow-up that repairs an "I couldn't find an app called X" reply
+# (catalog key apps.not_found): "no, I meant Notepad".
 _APP_CORRECTION_RE = re.compile(
     r"^(?:no )?(?:i said|i meant|its called|it is called|actually its called|"
     r"im saying|i am saying)\s+(.+)$"
@@ -178,12 +178,22 @@ class Session:
         confirmed = any(word in text for word in config.CONFIRM_WORDS)
         cancelled = any(word in text for word in config.CANCEL_WORDS)
 
+        if config.SPEECH_LANGUAGE == "hi":
+            # "हाँ" / "नहीं": Whisper writes Hindi answers in Devanagari.
+            spelled = hindi.spelling_key(text)
+            confirmed = confirmed or any(
+                hindi.spelling_key(word) in spelled for word in config.HINDI_CONFIRM_WORDS
+            )
+            cancelled = cancelled or any(
+                hindi.spelling_key(word) in spelled for word in config.HINDI_CANCEL_WORDS
+            )
+
         if confirmed and not cancelled:
 
             confirmation = self.pending_confirmation
             self.pending_confirmation = None
 
-            say_on_confirm = confirmation.say_on_confirm or "Done."
+            say_on_confirm = confirmation.say_on_confirm or t("session.done")
 
             print("\nLyra:", say_on_confirm, "\n")
             self.transcript.record(self.last_heard, say_on_confirm, "confirmation")
@@ -202,7 +212,7 @@ class Session:
         if cancelled:
 
             self.pending_confirmation = None
-            self.say("Cancelled.", handler="confirmation")
+            self.say(t("session.cancelled"), handler="confirmation")
 
             return True
 
@@ -226,14 +236,19 @@ class Session:
         hindi_match = re.match(r"^(?:कृपया )?याद (?:रखो|रखना)(?: कि)? (.+)$", raw.strip())
         match = hindi_match or re.match(r"^(?:remember|note) that (.+)$", raw, re.IGNORECASE)
 
+        # A Hindi memory command is answered in Hindi in every mode (as
+        # before); in SPEECH_LANGUAGE="hi" every memory reply is Hindi.
+        language = current_language()
+
         if match:
             item = match.group(1).strip()
+            said = "hi" if hindi_match else language
 
             if item in self.memory.items:
-                return ("मुझे यह पहले से याद है।" if hindi_match else "I already knew that."), None
+                return t_in(said, "memory.already"), None
             if self.memory.add(item):
-                return ("मैं यह याद रखूँगी।" if hindi_match else "I'll remember that."), None
-            return "I couldn't save that memory. Check the LYRA log.", None
+                return t_in(said, "memory.saved"), None
+            return t("memory.save_failed"), None
 
         # what do you remember
         hindi_recall = text in {"तुम्हें क्या याद है", "क्या याद है", "मेरे बारे में क्या याद है"}
@@ -243,12 +258,12 @@ class Session:
         ) or text in ("show memory", "list memory", "show my memory"):
 
             if not self.memory.items:
-                return ("अभी मुझे कुछ याद नहीं है।" if hindi_recall else "I don't remember anything yet."), None
+                return t_in("hi" if hindi_recall else language, "memory.empty"), None
 
             listed = ". ".join(
                 f"{i + 1}. {item}" for i, item in enumerate(self.memory.items[-10:])
             )
-            return ("मुझे ये बातें याद हैं: " if hindi_recall else "Here's what I remember: ") + listed, None
+            return t_in("hi" if hindi_recall else language, "memory.list_intro") + listed, None
 
         # forget that ... / रैप के बारे में भूल जाओ
         hindi_forget = re.match(r"^(.+?) के बारे में भूल (?:जाओ|जाना)$", text)
@@ -258,19 +273,16 @@ class Session:
             removed = self.memory.remove(match.group(1))
 
             if removed:
-                return ("ठीक है, वह बात भूल गई हूँ।" if hindi_forget else "Forgotten."), None
-            return ("वह बात मेरी याददाश्त में नहीं थी।" if hindi_forget else "That wasn't in my memory."), None
+                return t_in("hi" if hindi_forget else language, "memory.forgotten"), None
+            return t_in("hi" if hindi_forget else language, "memory.not_found"), None
 
         # forget everything (dangerous — confirm)
         if text in ("forget everything", "clear your memory", "clear memory", "wipe memory"):
 
             return None, Confirmation(
-                prompt=(
-                    "This deletes everything I remember. "
-                    "Say confirm to wipe it, or cancel."
-                ),
+                prompt=t("memory.wipe_prompt"),
                 action=self.memory.clear,
-                say_on_confirm="Memory wiped clean.",
+                say_on_confirm=t("memory.wiped"),
             )
 
         return None, None
@@ -279,10 +291,10 @@ class Session:
         try:
             plan = self.brain.plan_actions(raw)
             if self.task_executor.stop_requested:
-                self.say("The task was stopped before any action was run.", handler="planner")
+                self.say(t("planner.stopped_before"), handler="planner")
                 return
             if plan is None:
-                self.say("I couldn't create a valid, safe action plan for that task.", handler="planner")
+                self.say(t("planner.no_plan"), handler="planner")
                 return
             # write_text, not the chat stream: the chat voice adds spoken
             # preambles, keeps the text in conversation history, and on an
@@ -291,21 +303,21 @@ class Session:
             result = self.task_executor.run(plan, generate_text=self.brain.write_text)
             if result.status.value == "FAILURE":
                 failed = next((item for item in result.results if item.status.value == "FAILURE"), None)
-                detail = failed.detail if failed else "An action failed."
-                self.say("The task stopped because an action failed: " + detail[:180], handler="planner")
+                detail = failed.detail if failed else t("planner.action_failed_default")
+                self.say(t("planner.action_failed", detail=detail[:180]), handler="planner")
             elif result.status.value == "STOPPED":
-                self.say("The task was stopped.", handler="planner")
+                self.say(t("planner.stopped"), handler="planner")
             else:
-                self.say("I issued the planned actions. Their on-screen results are not yet independently verified.", handler="planner")
+                self.say(t("planner.issued"), handler="planner")
         except Exception:
             log.exception("Unexpected task execution error")
-            self.say("The task stopped because of an internal action error. See the LYRA log.", handler="planner")
+            self.say(t("planner.internal_error"), handler="planner")
         finally:
             self.task_active = False
 
     def _start_planned_task(self, raw):
         if self.task_active:
-            self.say("I am already working on a computer task. Say stop to cancel it.", handler="planner")
+            self.say(t("planner.busy"), handler="planner")
             return
         self.task_executor.reset_stop()
         self.task_active = True
@@ -314,7 +326,7 @@ class Session:
                 target=self._execute_planned_task, args=(raw,), daemon=True,
                 name="lyra-computer-task",
             )
-            self.say("Planning and carrying out the task. Say stop to cancel it.", handler="planner")
+            self.say(t("planner.started"), handler="planner")
             self._task_thread.start()
         else:
             self._execute_planned_task(raw)
@@ -322,6 +334,17 @@ class Session:
     # --------------------------------------------------------
     # PROCESS ONE COMMAND
     # --------------------------------------------------------
+
+    @staticmethod
+    def _hindi_intent(text):
+        """English command for recognised Hindi vocabulary (hi mode only)."""
+
+        if config.SPEECH_LANGUAGE != "hi":
+            return None
+        command = hindi.to_command(text)
+        if command is not None:
+            log.info("Hindi intent: %r -> %r", text, command)
+        return command
 
     def process(self, text, raw=None, _heard=None):
         """Process one already-wake-stripped command. Returns True to exit."""
@@ -334,10 +357,22 @@ class Session:
         if not normalized:
             return False
 
+        # What the user really said goes to the chat model and to preference
+        # capture, even when the Hindi layer below rewrote it for the skills.
+        chat_raw = raw
+
+        # SPEECH_LANGUAGE="hi": recognised Hindi command vocabulary is
+        # rewritten to the English phrasing the skills understand
+        # ("नोटपैड खोलो" -> "open notepad"). Anything else is left alone.
+        intent = self._hindi_intent(text)
+        if intent is not None:
+            text = raw = intent
+            normalized = strip_politeness(normalize(intent))
+
         # terminate
         if is_terminate(normalized):
             self.stop_active_task()
-            self.say("Going offline. Goodbye.", handler="session")
+            self.say(t("session.goodbye"), handler="session")
             return True
 
         # A wake phrase at the start is an address, not part of the command:
@@ -347,17 +382,17 @@ class Session:
         woke, remainder = strip_wake_word(normalize(text))
         if woke:
             if not remainder:
-                self.say("Yes?", handler="session")
+                self.say(t("session.yes"), handler="session")
                 return False
             return self.process(remainder, raw=remainder, _heard=heard)
 
         if normalized in {"stop", "stop task", "cancel task", "abort task"} and self.task_active:
             self.stop_active_task()
-            self.say("Stopping the active task safely.", handler="session")
+            self.say(t("session.stopping_task"), handler="session")
             return False
 
         if self.task_active:
-            self.say("I am still working. Say stop to cancel the active task.", handler="session")
+            self.say(t("session.still_working"), handler="session")
             return False
 
         # pending shutdown/restart confirmations
@@ -365,7 +400,7 @@ class Session:
             return False
 
         if normalized in {"stop", "stop task", "cancel task", "abort task"}:
-            self.say("There is no active computer task.", handler="session")
+            self.say(t("session.no_task"), handler="session")
             return False
 
         # A misheard app name gets one repair turn: after "I couldn't find an
@@ -379,7 +414,7 @@ class Session:
                 if repaired:
                     # A second miss re-arms the window for one more try.
                     self.last_app_not_found = (
-                        repaired if repaired.startswith(_APP_NOT_FOUND_PREFIX) else None
+                        repaired if message_matches("apps.not_found", repaired) else None
                     )
                     self.say(repaired, handler="skill:apps")
                     return False
@@ -388,8 +423,8 @@ class Session:
         reply, confirmation = self._handle_memory(normalized, raw)
         handler = "memory" if (reply is not None or confirmation is not None) else None
 
-        preferences = extract_preferences(raw)
-        taste_conversation = is_taste_conversation(raw)
+        preferences = extract_preferences(chat_raw)
+        taste_conversation = is_taste_conversation(chat_raw)
         if reply is None and confirmation is None and not taste_conversation:
             # skills (PC control) first. Run-on web patterns like
             # "open brave and open youtube" are answered directly there —
@@ -410,7 +445,7 @@ class Session:
 
         if reply is not None:
             self.last_app_not_found = (
-                reply if reply.startswith(_APP_NOT_FOUND_PREFIX) else None
+                reply if message_matches("apps.not_found", reply) else None
             )
             self.say(reply, handler=handler or "skill")
             return False
@@ -422,7 +457,7 @@ class Session:
         )
 
         # brain (LLM) — streamed sentence by sentence
-        self.say_stream(self.brain.ask_stream(raw.strip()), handler="chat model")
+        self.say_stream(self.brain.ask_stream(chat_raw.strip()), handler="chat model")
 
         return False
 
@@ -564,7 +599,7 @@ def _handle_interrupt(session, heard, always_listening):
 
     if is_terminate(normalized):
         session.stop_active_task()
-        session.say("Going offline. Goodbye.", handler="session")
+        session.say(t("session.goodbye"), handler="session")
         return True
 
     # A filler may be the start of a real confirmation answer, so it is
@@ -581,7 +616,7 @@ def _handle_interrupt(session, heard, always_listening):
     # "stop"/"be quiet" only means "shut up" when nothing is running;
     # during a task it is the cancellation word.
     if is_stop_speech(normalized) and not session.task_active:
-        session.say("Okay.", handler="session")
+        session.say(t("session.okay"), handler="session")
         return False
 
     return session.process(heard, raw=heard)
@@ -683,7 +718,7 @@ def run_voice_mode(session, always_listening):
 
     import speech_recognition as sr
 
-    from lyra.ear import Ear
+    from lyra.ear import Ear, clean_transcript
     from lyra.voice import Voice
     from lyra.wake import WakeWordDetector, format_wake_debug
 
@@ -710,6 +745,11 @@ def run_voice_mode(session, always_listening):
                        device_index=config.INPUT_DEVICE) as source:
 
         print(f"Input device: {input_device_label(getattr(source, 'device_index', config.INPUT_DEVICE))}")
+        print(f"Speech language: {config.SPEECH_LANGUAGE} "
+              f"(Whisper model: {config.WHISPER_MODEL})")
+        if config.INPUT_DEVICE is None:
+            print("INPUT_DEVICE is not set, so the Windows default microphone is used. "
+                  "If that is the wrong one, pick an index from `python main.py --devices`.")
         print("Calibrating microphone...")
         recognizer.adjust_for_ambient_noise(source, duration=0.5)
         calibrated, applied = apply_energy_threshold(recognizer)
@@ -735,7 +775,7 @@ def run_voice_mode(session, always_listening):
         print("Interrupt: just start talking while she speaks")
         print()
 
-        voice.speak("Online.")
+        voice.speak(t("session.online"))
 
         # Barge-in watcher: the microphone stays open while she talks.
         interrupt_queue = queue.Queue()
@@ -825,16 +865,26 @@ def run_voice_mode(session, always_listening):
                     # lightweight mode; it is checked before the normal wake gate.
                     if is_terminate(normalize(wake_transcript)):
                         session.stop_active_task()
-                        session.say("Going offline. Goodbye.", handler="session")
+                        session.say(t("session.goodbye"), handler="session")
                         break
                     if not assessment.matched:
                         continue
                     wake_gate_matched = True
-                    wake_gate_remainder = assessment.remainder
+                    # The wake transcript is RAW (so --debug-wake shows the
+                    # truth); anything used as a command is cleaned first so a
+                    # Whisper loop can never be answered as speech.
+                    wake_gate_remainder = clean_transcript(assessment.remainder)
                     lightweight_wake_hit = wake_detector.lightweight
                     # Run command-quality Whisper only on the short clip after
                     # the inexpensive wake recognizer has accepted a wake phrase.
-                    heard = ear.transcribe_audio(audio) if lightweight_wake_hit else wake_transcript
+                    if lightweight_wake_hit:
+                        heard = ear.transcribe_audio(audio)
+                    else:
+                        heard = clean_transcript(wake_transcript)
+                        if not heard:
+                            # "Hey Lyra" followed by a Whisper loop: keep the
+                            # wake, drop the loop (never answer it as speech).
+                            heard = config.WAKE_WORD.capitalize()
                 else:
                     heard = ear.transcribe_audio(audio)
 
@@ -849,7 +899,7 @@ def run_voice_mode(session, always_listening):
                 # terminate works in every mode, no wake word needed
                 if is_terminate(normalized):
                     session.stop_active_task()
-                    session.say("Going offline. Goodbye.", handler="session")
+                    session.say(t("session.goodbye"), handler="session")
                     break
 
                 # Filler-only utterances ("Okay.", "hmm...") are dropped
@@ -865,7 +915,7 @@ def run_voice_mode(session, always_listening):
                 if always_listening:
 
                     if is_sleep(normalized) or is_thanks(normalized):
-                        session.say("Okay.")
+                        session.say(t("session.okay"))
                         continue
 
                     exit_now = session.process(heard, raw=heard)
@@ -880,7 +930,7 @@ def run_voice_mode(session, always_listening):
                             if config.SPEAK_BEEP:
                                 voice.beep()
                             awake_until = 0.0
-                            session.say("Okay, going back to sleep.")
+                            session.say(t("session.sleep"))
                             continue
 
                         exit_now = session.process(heard, raw=heard)
@@ -956,10 +1006,17 @@ VOICE_TEST_SENTENCE = (
 HINDI_VOICE_TEST_SENTENCE = "नमस्ते! मैं लायरा हूँ। मुझे हिंदी में आपसे बात करके अच्छा लगता है।"
 
 
-def run_voice_test(language="en"):
-    """Test the chosen language without requiring Whisper or Ollama."""
+def run_voice_test(language=None):
+    """Test the chosen language without requiring Whisper or Ollama.
+
+    Without --voice-language the test follows SPEECH_LANGUAGE: Hindi in
+    "hi" mode (the pack LYRA will actually speak with), English otherwise.
+    """
 
     from lyra.voice import Voice
+
+    if language is None:
+        language = "hi" if config.SPEECH_LANGUAGE == "hi" else "en"
 
     model = config.HINDI_VOICE_MODEL if language == "hi" else config.VOICE_MODEL
     print(f"Voice: {model}")
@@ -1070,6 +1127,11 @@ def _level_bar(level, peak=None, width=MIC_TEST_BAR_WIDTH):
     return "#" * filled + "-" * (width - filled)
 
 
+# A normal voice at arm's length peaks well below this chunk RMS; above it the
+# input is usually clipping (Windows level at 100 or aggressive AGC).
+MIC_TEST_LOUD_PEAK = 4000.0
+
+
 def run_mic_test(seconds=MIC_TEST_SECONDS):
     """--mic-test: live level meter, then one clip through the wake path.
 
@@ -1097,6 +1159,11 @@ def run_mic_test(seconds=MIC_TEST_SECONDS):
 
         print()
         print(f"Input device: {input_device_label(getattr(source, 'device_index', config.INPUT_DEVICE))}")
+        print(f"Speech language: {config.SPEECH_LANGUAGE} "
+              f"(Whisper model: {config.WHISPER_MODEL})")
+        if config.INPUT_DEVICE is None:
+            print("INPUT_DEVICE is not set, so the Windows default microphone is used. "
+                  "If that is the wrong one, pick an index from `python main.py --devices`.")
 
         print(f"Live level for {seconds:.0f} seconds — speak normally...")
         peak = 0.0
@@ -1116,6 +1183,11 @@ def run_mic_test(seconds=MIC_TEST_SECONDS):
             print("Nothing reached the microphone: check Windows microphone privacy "
                   "settings and INPUT_DEVICE (`python main.py --devices`).")
             return 1
+        if peak >= MIC_TEST_LOUD_PEAK:
+            print("The microphone is very loud (clipping distorts speech and makes "
+                  "Whisper hallucinate). Lower the level in Windows Settings > System > "
+                  "Sound > Input, and turn off any automatic gain / \"enhancements\" "
+                  "for this microphone.")
 
         print("Calibrating ambient noise...")
         recognizer.adjust_for_ambient_noise(source, duration=0.5)
@@ -1179,8 +1251,9 @@ def main():
     parser.add_argument("--voice-test", action="store_true",
                         help="speak one sample sentence with the current "
                              "voice and speed, then exit")
-    parser.add_argument("--voice-language", choices=("en", "hi"), default="en",
-                        help="language to use for --voice-test (default: en)")
+    parser.add_argument("--voice-language", choices=("en", "hi"), default=None,
+                        help="language to use for --voice-test (default: hi when "
+                             "SPEECH_LANGUAGE is hi, otherwise en)")
     args = parser.parse_args()
 
     if args.debug_wake:
