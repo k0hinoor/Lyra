@@ -221,6 +221,32 @@ class FakeResponse:
 # ------------------------------------------------------------
 
 @pytest.fixture(autouse=True)
+def bilingual_speech_language(monkeypatch):
+    """Run every test in SPEECH_LANGUAGE="auto" unless it opts into a mode.
+
+    The shipped config defaults to "hi" (Hindi in, Hindi out). "auto" is the
+    original bilingual behaviour the English-literal assertions describe, so
+    the suite pins it here; Hindi-mode tests set "hi" explicitly with
+    monkeypatch (see the ``hindi_mode`` fixture).
+    """
+
+    from lyra import config
+
+    monkeypatch.setattr(config, "SPEECH_LANGUAGE", "auto")
+    return "auto"
+
+
+@pytest.fixture
+def hindi_mode(monkeypatch):
+    """SPEECH_LANGUAGE="hi" for one test."""
+
+    from lyra import config
+
+    monkeypatch.setattr(config, "SPEECH_LANGUAGE", "hi")
+    return "hi"
+
+
+@pytest.fixture(autouse=True)
 def isolated_memory_file(tmp_path, monkeypatch):
     """Never let a test read or write the real memory.json."""
 

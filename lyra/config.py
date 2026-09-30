@@ -57,13 +57,29 @@ HISTORY_MESSAGES = 12         # short-term context lines sent to the brain
 AUTO_REMEMBER_PREFERENCES = True
 
 # ------------------------------------------------------------
+# SPEECH LANGUAGE  (what LYRA listens for and answers in)
+# ------------------------------------------------------------
+#   "hi"   = always Hindi: speech is decoded as Hindi, every reply,
+#            acknowledgement, skill answer and confirmation is Hindi
+#            (Devanagari, everyday colloquial), spoken by the Hindi voice.
+#            English speech is decoded as Hindi too — by design.
+#   "en"   = English in, English out.
+#   "auto" = the original bilingual behaviour: WHISPER_LANGUAGE decides the
+#            recognition language and replies follow the user's language.
+SPEECH_LANGUAGE = "hi"
+
+# ------------------------------------------------------------
 # EARS  (faster-whisper speech-to-text)
 # ------------------------------------------------------------
 
 # Use multilingual names (without .en) for English, Hindi and Hinglish.
 # "base" = quick on CPU | "small" = more accurate Hindi, but slower/larger.
+# For Hindi (SPEECH_LANGUAGE "hi") "small" is the practical minimum: "base"
+# mishears Hindi badly. small is ~3x slower on CPU (roughly 1-2 s per command
+# on a modern laptop CPU instead of well under a second) and ~460 MB.
 WHISPER_MODEL = "base"
-WHISPER_LANGUAGE = "auto"     # auto-detect each utterance; or force "en" / "hi"
+WHISPER_LANGUAGE = "auto"     # used when SPEECH_LANGUAGE is "auto": auto-detect
+                              # each utterance, or force "en" / "hi"
 WHISPER_DEVICE = "cpu"
 WHISPER_COMPUTE = "int8"      # int8 = fast on CPU
 WHISPER_BEAM = 3              # 1 = fastest; 3–5 improves decoding at a CPU cost
@@ -75,6 +91,20 @@ WHISPER_BEAM = 3              # 1 = fastest; 3–5 improves decoding at a CPU co
 WHISPER_HOTWORDS = (
     "Hey Lyra Lyra Brave Chrome YouTube Notepad terminate execution "
     "लायरा लाइरा ब्रेव क्रोम यूट्यूब नोटपैड"
+)
+
+# English-only bias for the English wake pass. The Devanagari half of
+# WHISPER_HOTWORDS used to be echoed back verbatim when Whisper could not
+# ground it in a 1-2 s English clip ("परेव परेव परेव ..."), so the English
+# wake pass never sees a single Devanagari word.
+WHISPER_WAKE_HOTWORDS = "Hey Lyra Laira Lira Laura Leyra Leira Lyrah"
+
+# Hindi command vocabulary, added to Hindi command passes only (never to the
+# English wake pass). Keep it short and auditable: a long list brings the
+# echo problem above straight back.
+WHISPER_HINDI_HOTWORDS = (
+    "खोलो खोल बंद बजाओ चलाओ लगाओ बढ़ाओ कम करो बताओ आवाज़ वॉल्यूम "
+    "ब्राइटनेस चमक नोटपैड ब्रेव क्रोम यूट्यूब गाना गीत समय मौसम"
 )
 
 # ------------------------------------------------------------
@@ -193,6 +223,11 @@ INTERRUPT_ECHO_WINDOW_SECONDS = 30     # how long her own words stay "spoken"
 
 CONFIRM_WORDS = ["confirm", "yes", "yeah", "do it", "proceed", "sure", "go ahead", "haan", "haan ji"]
 CANCEL_WORDS = ["cancel", "no", "nope", "stop", "abort", "do not", "dont", "nahi", "nahin", "nah"]
+
+# Extra answers accepted only when SPEECH_LANGUAGE is "hi" (Whisper writes a
+# spoken "haan" in Devanagari once it decodes Hindi).
+HINDI_CONFIRM_WORDS = ["हाँ", "हां", "ठीक है", "कर दो", "पक्का", "कन्फर्म", "यस"]
+HINDI_CANCEL_WORDS = ["नहीं", "नही", "मत करो", "रद्द", "रहने दो", "कैंसल", "रुको", "स्टॉप"]
 
 SHUTDOWN_DELAY = 5            # seconds between confirmed shutdown and the actual shutdown
 
@@ -321,6 +356,9 @@ _SETTINGS = {
     "WAKE_WINDOW_SECONDS": "WAKE_WINDOW_SECONDS",
     "WHISPER_MODEL": "WHISPER_MODEL",
     "WHISPER_LANGUAGE": "WHISPER_LANGUAGE",
+    "SPEECH_LANGUAGE": "SPEECH_LANGUAGE",
+    "WHISPER_WAKE_HOTWORDS": "WHISPER_WAKE_HOTWORDS",
+    "WHISPER_HINDI_HOTWORDS": "WHISPER_HINDI_HOTWORDS",
     "WHISPER_BEAM": "WHISPER_BEAM",
     "OLLAMA_URL": "OLLAMA_URL",
     "LOG_LEVEL": "LOG_LEVEL",
@@ -331,6 +369,22 @@ def normalize_whisper_language(value):
     """Settings-friendly language values; None means an invalid selection."""
     aliases = {"auto": "auto", "en": "en", "english": "en", "hi": "hi", "hindi": "hi"}
     return aliases.get(str(value).strip().casefold())
+
+
+def normalize_speech_language(value):
+    """SPEECH_LANGUAGE values: "auto", "en" or "hi"; None means invalid."""
+    return normalize_whisper_language(value)
+
+
+def stt_language():
+    """The recognition language in effect: "hi", "en" or "auto".
+
+    SPEECH_LANGUAGE "hi"/"en" pins recognition; "auto" defers to
+    WHISPER_LANGUAGE exactly as before SPEECH_LANGUAGE existed.
+    """
+    if SPEECH_LANGUAGE in ("hi", "en"):
+        return SPEECH_LANGUAGE
+    return WHISPER_LANGUAGE
 
 
 def parse_boolean(value):
@@ -383,6 +437,10 @@ def _parse_setting(target, value):
             raise ValueError("must be between 1 and 5")
     elif target == "WHISPER_LANGUAGE":
         value = normalize_whisper_language(value)
+        if value is None:
+            raise ValueError("must be auto, en or hi")
+    elif target == "SPEECH_LANGUAGE":
+        value = normalize_speech_language(value)
         if value is None:
             raise ValueError("must be auto, en or hi")
     elif target in ("AUTO_REMEMBER_PREFERENCES", "WAKE_DEBUG"):
