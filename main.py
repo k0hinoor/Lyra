@@ -11,23 +11,32 @@
    python main.py --always      always-listening mode
    python main.py --text        type instead of talk (testing)
    python main.py --devices     list audio output devices
+
+ Barge-in: while she speaks a watcher thread keeps the microphone
+ open, so talking over her stops playback and the captured phrase
+ becomes the next command.
 ============================================================
 """
 
 import argparse
+import collections
 import logging
+import queue
 import re
 import threading
 import time
 
+import numpy as np
+
 from lyra import config
 from lyra.memory import Memory
-from lyra.skills import Confirmation, route_with_handler
+from lyra.skills import Confirmation, apps, route_with_handler
 from lyra.transcript import Transcript
 from lyra.utils import (
     correct_name,
     is_filler,
     is_sleep,
+    is_stop_speech,
     is_terminate,
     is_thanks,
     normalize,
@@ -41,6 +50,45 @@ from lyra.utils import (
 # ============================================================
 
 log = logging.getLogger(__name__)
+
+# What the apps skill says when a name could not be launched, and the
+# follow-up that repairs it: "no, I meant Notepad".
+_APP_NOT_FOUND_PREFIX = "I couldn't find an app called"
+
+_APP_CORRECTION_RE = re.compile(
+    r"^(?:no )?(?:i said|i meant|its called|it is called|actually its called|"
+    r"im saying|i am saying)\s+(.+)$"
+)
+
+_APP_REPAIR_BLOCKERS = {"stop", "cancel", "sleep", "go to sleep"}
+
+_APP_OPEN_VERB = re.compile(r"^(?:open|launch|start|run)\s+")
+
+# 16 kHz mono is what Whisper wants, and it is the rate the captured
+# barge-in audio is labelled with.
+MIC_SAMPLE_RATE = 16000
+
+
+def _match_app_correction(normalized):
+    """
+    Pull the app name out of a repair after a failed open.
+
+    "no i meant notepad" / "i said open notepad please" -> "notepad",
+    and None for anything that is not a name.
+    """
+
+    match = _APP_CORRECTION_RE.match(normalized.strip())
+
+    if not match:
+        return None
+
+    candidate = strip_politeness(match.group(1).strip())
+    candidate = _APP_OPEN_VERB.sub("", candidate).strip()
+
+    if not candidate or candidate in _APP_REPAIR_BLOCKERS:
+        return None
+
+    return candidate
 
 
 def _looks_like_multistep_computer_task(text):
@@ -67,6 +115,7 @@ class Session:
         self.pending_confirmation = None
         self.transcript = Transcript()
         self.last_heard = ""
+        self.last_app_not_found = None
         from lyra.actions.executor import ActionExecutor
         self.task_executor = ActionExecutor()
         self.task_active = False
@@ -310,6 +359,22 @@ class Session:
             self.say("There is no active computer task.", handler="session")
             return False
 
+        # A misheard app name gets one repair turn: after "I couldn't find an
+        # app called X", "no, I meant Y" opens Y without re-explaining the
+        # whole command. Any other reply closes the window.
+        if self.last_app_not_found:
+            corrected = _match_app_correction(normalized)
+            self.last_app_not_found = None
+            if corrected:
+                repaired = apps.open_by_name(corrected)
+                if repaired:
+                    # A second miss re-arms the window for one more try.
+                    self.last_app_not_found = (
+                        repaired if repaired.startswith(_APP_NOT_FOUND_PREFIX) else None
+                    )
+                    self.say(repaired, handler="skill:apps")
+                    return False
+
         # memory commands (need the Memory instance, not in the skill router)
         reply, confirmation = self._handle_memory(normalized, raw)
         handler = "memory" if (reply is not None or confirmation is not None) else None
@@ -333,6 +398,9 @@ class Session:
             return False
 
         if reply is not None:
+            self.last_app_not_found = (
+                reply if reply.startswith(_APP_NOT_FOUND_PREFIX) else None
+            )
             self.say(reply, handler=handler or "skill")
             return False
 
@@ -340,6 +408,166 @@ class Session:
         self.say_stream(self.brain.ask_stream(raw.strip()), handler="chat model")
 
         return False
+
+
+# ============================================================
+# BARGE-IN
+# ============================================================
+# While LYRA speaks, a watcher thread keeps the microphone open.
+# Sustained voice stops her playback at once and the rest of that
+# phrase is captured, transcribed and handled as the next command.
+# Her own voice coming back through the speakers is filtered out by
+# comparing the transcript with what she has just said.
+
+def _chunk_rms(raw):
+    """RMS level of one raw int16 microphone chunk (0 = silence)."""
+    samples = np.frombuffer(bytes(raw), dtype=np.int16).astype(np.float64)
+    if samples.size == 0:
+        return 0.0
+    return float(np.sqrt(np.mean(samples ** 2)))
+
+
+def _poll_for_interrupt(source, voice, energy_threshold):
+    """
+    Watch the microphone while LYRA is speaking.
+
+    Returns the captured speech_recognition.AudioData for the interrupting
+    phrase, or None when she finished her sentence without being cut off.
+    The chunk size and the audio format come from the live microphone, so
+    the AudioData handed to Whisper is labelled the way it really sounds.
+    """
+
+    import speech_recognition as sr
+
+    chunk_seconds = (source.CHUNK + 0.0) / source.SAMPLE_RATE
+    voiced_needed = max(1, int(config.INTERRUPT_MIN_VOICE_SECONDS / chunk_seconds))
+    silence_needed = max(1, int(config.INTERRUPT_SILENCE_SECONDS / chunk_seconds))
+    deadline = time.monotonic() + config.INTERRUPT_PHRASE_LIMIT
+
+    # Only the barge-in itself and the tail of the phrase are worth keeping.
+    frames = collections.deque(maxlen=voiced_needed + silence_needed)
+    voiced_run = 0
+    triggered = False
+
+    while voice.is_speaking:
+
+        raw = source.stream.read(source.CHUNK)
+        frames.append(raw)
+
+        if _chunk_rms(raw) > energy_threshold:
+            voiced_run += 1
+        else:
+            voiced_run = 0
+
+        if voiced_run >= voiced_needed:
+            voice.stop()
+            triggered = True
+            break
+
+    if not triggered:
+        return None
+
+    # The user keeps talking after the cut-off; keep listening until the
+    # pause that ends the phrase, or the capture limit.
+    quiet_run = 0
+
+    while quiet_run < silence_needed and time.monotonic() < deadline:
+        raw = source.stream.read(source.CHUNK)
+        frames.append(raw)
+        if _chunk_rms(raw) > energy_threshold:
+            quiet_run = 0
+        else:
+            quiet_run += 1
+
+    return sr.AudioData(b"".join(bytes(frame) for frame in frames),
+                        source.SAMPLE_RATE, source.SAMPLE_WIDTH)
+
+
+def _watch_once(voice, source, recognizer, ear, out_queue):
+    """One barge-in attempt: capture, transcribe, and queue what was said."""
+
+    # Louder than the calibrated room noise, or her own voice on the
+    # speakers would keep interrupting her.
+    energy_threshold = max(
+        1.0,
+        recognizer.energy_threshold * config.INTERRUPT_ENERGY_MULTIPLIER,
+    )
+
+    # The capture flag covers the whole cycle, not just the poll: while it
+    # is set the main loop must not start its own listen() (it would steal
+    # chunks from this stream), and the captured phrase must be handled
+    # before the loop goes back to sleep.
+    voice.start_capture()
+    try:
+        audio = _poll_for_interrupt(source, voice, energy_threshold)
+
+        if audio is None:
+            return
+
+        heard = ear.transcribe_audio(audio)
+        normalized = normalize(heard or "")
+
+        if not normalized:
+            return
+
+        if is_filler(normalized) and not is_stop_speech(normalized):
+            return
+
+        # "stop"/"be quiet" are never the speaker's echo, so they are kept
+        # even when they happen to match what she just said.
+        if is_stop_speech(normalized) or not voice.looks_like_echo(heard):
+            out_queue.put(heard)
+    finally:
+        voice.end_capture()
+
+
+def _interrupt_watcher(voice, source, recognizer, ear, out_queue, stop_event):
+    """Background thread: keep trying to catch LYRA talking over herself."""
+
+    while not stop_event.is_set():
+
+        if not voice.is_speaking:
+            time.sleep(0.05)
+            continue
+
+        try:
+            _watch_once(voice, source, recognizer, ear, out_queue)
+        except Exception:
+            log.exception("Barge-in watcher failed")
+            time.sleep(0.2)
+
+
+def _handle_interrupt(session, heard, always_listening):
+    """Handle one phrase captured while LYRA was speaking. True = exit."""
+
+    print(f"You: {correct_name(heard)}")
+    session.last_heard = heard
+
+    normalized = normalize(heard)
+
+    if is_terminate(normalized):
+        session.stop_active_task()
+        session.say("Going offline. Goodbye.", handler="session")
+        return True
+
+    # A filler may be the start of a real confirmation answer, so it is
+    # only dropped when nothing is waiting for one.
+    if session.pending_confirmation is None and is_filler(normalized):
+        return False
+
+    if not always_listening:
+        # In wake-word mode a bare "Hey Lyra" is not a command.
+        _woke, remainder = strip_wake_word(normalized)
+        if not remainder:
+            return False
+
+    # "stop"/"be quiet" only means "shut up" when nothing is running;
+    # during a task it is the cancellation word.
+    if is_stop_speech(normalized) and not session.task_active:
+        session.say("Okay.", handler="session")
+        return False
+
+    return session.process(heard, raw=heard)
 
 
 # ============================================================
@@ -400,7 +628,9 @@ def run_voice_mode(session, always_listening):
 
     print()
 
-    with sr.Microphone() as source:
+    # 16 kHz mono: what Whisper wants anyway, and the rate the barge-in
+    # capture labels its AudioData with.
+    with sr.Microphone(sample_rate=MIC_SAMPLE_RATE) as source:
 
         print("Calibrating microphone...")
         recognizer.adjust_for_ambient_noise(source, duration=0.5)
@@ -419,9 +649,21 @@ def run_voice_mode(session, always_listening):
 
         print(f"Kill command: 'terminate execution'")
         print("Emergency stop: Ctrl+C")
+        print("Interrupt: just start talking while she speaks")
         print()
 
         voice.speak("Online.")
+
+        # Barge-in watcher: the microphone stays open while she talks.
+        interrupt_queue = queue.Queue()
+        interrupt_stop = threading.Event()
+        interrupt_thread = threading.Thread(
+            target=_interrupt_watcher,
+            args=(voice, source, recognizer, ear, interrupt_queue, interrupt_stop),
+            daemon=True,
+            name="lyra-barge-in",
+        )
+        interrupt_thread.start()
 
         if not always_listening:
             print("Waiting for the wake word...")
@@ -433,8 +675,25 @@ def run_voice_mode(session, always_listening):
 
             try:
 
-                # Do not capture the assistant's own playback as user speech.
-                if voice.is_speaking:
+                # Something was said over her: handle it as a new command.
+                interrupted_exit = False
+
+                while not interrupt_queue.empty():
+                    heard = interrupt_queue.get()
+                    if not heard:
+                        continue
+                    if _handle_interrupt(session, heard, always_listening):
+                        interrupted_exit = True
+                        break
+                    if not always_listening:
+                        awake_until = time.time() + config.FOLLOW_UP_SECONDS
+
+                if interrupted_exit:
+                    break
+
+                # Do not capture the assistant's own playback as user speech
+                # (the barge-in watcher's own reads count as capture too).
+                if voice.is_speaking or voice.capturing:
                     time.sleep(0.1)
                     continue
 
@@ -583,6 +842,11 @@ def run_voice_mode(session, always_listening):
             except Exception:
                 log.exception("Unexpected voice-loop error")
                 continue
+
+    # The microphone stream is closed now; wake the watcher up and give it
+    # a moment to notice before the process carries on shutting down.
+    interrupt_stop.set()
+    interrupt_thread.join(1.0)
 
     voice.stop()
     print()

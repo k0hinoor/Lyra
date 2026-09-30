@@ -78,6 +78,47 @@ def test_unknown_browsers_are_rejected(value):
 
 
 # ------------------------------------------------------------
+# BARGE-IN ENERGY MULTIPLIER
+# ------------------------------------------------------------
+
+def test_the_default_barge_in_threshold_is_twice_the_room_noise():
+    assert config.INTERRUPT_ENERGY_MULTIPLIER == 2.0
+
+
+@pytest.mark.parametrize("value, expected", [
+    (1.0, 1.0),
+    (2, 2.0),
+    ("3.5", 3.5),
+    (10, 10.0),
+])
+def test_barge_in_multipliers_inside_the_range_pass(value, expected):
+    assert config.clamp_interrupt_multiplier(value) == expected
+
+
+@pytest.mark.parametrize("value, expected", [
+    (0.5, 1.0),          # at/below the floor -> never interrupt
+    (0, 1.0),
+    (-4, 1.0),
+    (99, 10.0),          # above the ceiling -> a cough would interrupt
+    ("50", 10.0),
+])
+def test_barge_in_multiplier_is_clamped(value, expected):
+    assert config.clamp_interrupt_multiplier(value) == expected
+
+
+@pytest.mark.parametrize("value", ["loud", None, "", "n/a"])
+def test_non_numeric_barge_in_multiplier_is_rejected(value):
+    assert config.clamp_interrupt_multiplier(value) is None
+
+
+def test_the_barge_in_timings_are_usable():
+    assert 0 < config.INTERRUPT_MIN_VOICE_SECONDS <= 1
+    assert config.INTERRUPT_SILENCE_SECONDS > config.INTERRUPT_MIN_VOICE_SECONDS
+    assert 1 <= config.INTERRUPT_PHRASE_LIMIT <= 30
+    assert config.INTERRUPT_ECHO_WINDOW_SECONDS >= config.INTERRUPT_PHRASE_LIMIT
+
+
+# ------------------------------------------------------------
 # WHISPER HOTWORDS
 # ------------------------------------------------------------
 

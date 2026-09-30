@@ -344,6 +344,107 @@ def test_unknown_app_failure_is_spoken_not_raised(session, fake_brain, monkeypat
 
 
 # ------------------------------------------------------------
+# REPAIRING A MISHEARD APP NAME
+# ------------------------------------------------------------
+# "open davinci resole" -> "I couldn't find an app called davinci
+# resole." must not leave the user stuck: "no, I meant DaVinci
+# Resolve" opens the app on the very next turn.
+
+@pytest.fixture
+def only_notepad(tmp_path, monkeypatch):
+    """A launcher that only knows one app, with no Start Menu to find."""
+    from lyra.skills import apps
+
+    launched = []
+
+    def start(target):
+        if str(target).lower() != "notepad":
+            raise FileNotFoundError(target)
+        launched.append(target)
+
+    monkeypatch.setattr(apps, "_start", start)
+    monkeypatch.setenv("APPDATA", str(tmp_path / "no-user-start-menu"))
+    monkeypatch.setenv("PROGRAMDATA", str(tmp_path / "no-common-start-menu"))
+
+    return launched
+
+
+@pytest.mark.parametrize("misheard", ["open davinci resole", "open adobe premiere please"])
+def test_a_corrected_name_is_opened_without_repeating_the_command(
+        session, only_notepad, capfd, misheard):
+    session.process(misheard)
+
+    assert "couldn't find an app called" in capfd.readouterr().out
+    assert session.last_app_not_found is not None
+
+    assert session.process("no i meant notepad") is False
+
+    assert only_notepad == ["notepad"]
+    assert "Opening Notepad." in capfd.readouterr().out
+    assert session.last_app_not_found is None
+
+
+def test_a_correction_may_name_the_verb_and_be_polite(session, only_notepad):
+    session.process("open adobe premiere")
+    assert session.last_app_not_found is not None
+
+    session.process("I said open notepad please")
+
+    assert only_notepad == ["notepad"]
+
+
+def test_a_failed_correction_buys_exactly_one_more_try(session, only_notepad, capfd):
+    session.process("open adobe premiere")
+    session.process("i meant word pad")
+
+    assert "couldn't find an app called" in capfd.readouterr().out
+    assert session.last_app_not_found is not None
+
+    session.process("no i meant notepad")
+
+    assert only_notepad == ["notepad"]
+
+
+def test_a_normal_command_closes_the_repair_window(session, only_notepad, fake_brain):
+    session.process("open adobe premiere")
+    assert session.last_app_not_found is not None
+
+    session.process("what time is it")
+
+    assert session.last_app_not_found is None
+
+    session.process("i meant notepad")
+
+    assert only_notepad == [], "the repair window must be closed"
+    assert fake_brain.asked, "the correction is just chat now"
+
+
+def test_a_repair_is_not_reached_while_a_task_is_running(session, only_notepad, capfd):
+    session.process("open adobe premiere")
+    session.task_active = True
+
+    assert session.process("i meant notepad") is False
+
+    assert only_notepad == []
+    assert "still working" in capfd.readouterr().out
+
+
+@pytest.mark.parametrize("text, expected", [
+    ("no i meant notepad", "notepad"),
+    ("i meant notepad", "notepad"),
+    ("actually its called notepad", "notepad"),
+    ("im saying notepad please", "notepad"),
+    ("i said open notepad", "notepad"),
+    ("i said stop", None),
+    ("i meant go to sleep", None),
+    ("open notepad", None),
+    ("", None),
+])
+def test_only_a_repair_looking_utterance_is_a_correction(text, expected):
+    assert main._match_app_correction(text) == expected
+
+
+# ------------------------------------------------------------
 # EVERY REPLY IS PRINTED AND TRANSCRIBED
 # ------------------------------------------------------------
 

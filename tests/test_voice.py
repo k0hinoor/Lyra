@@ -473,3 +473,72 @@ def test_ensure_voice_pack_skips_the_download_when_complete(monkeypatch, tmp_pat
     monkeypatch.setattr(voice_module.requests, "get", refuse)
 
     assert voice_module.ensure_voice_pack() == model
+
+
+# ------------------------------------------------------------
+# SPEAKER ECHO  (barge-in must not interrupt LYRA with her own voice)
+# ------------------------------------------------------------
+
+def test_the_capture_flag_is_off_until_the_watcher_needs_it(pack):
+    voice, _piper, _device = pack()
+
+    assert voice.capturing is False
+
+    voice.start_capture()
+    assert voice.capturing is True
+
+    voice.end_capture()
+    assert voice.capturing is False
+
+
+def test_what_she_says_is_remembered_for_echo_detection(pack):
+    voice, _piper, _device = pack()
+
+    voice.speak_stream(iter(["Opening Notepad for you right now."]))
+
+    assert voice.looks_like_echo("Opening Notepad for you")
+    assert not voice.looks_like_echo("play some lo-fi music")
+
+
+def test_an_empty_phrase_is_never_an_echo(pack):
+    voice, _piper, _device = pack()
+    voice.remember_spoken("Opening Notepad")
+
+    assert voice.looks_like_echo("") is False
+    assert voice.looks_like_echo("   ") is False
+
+
+def test_the_overlap_needed_for_an_echo_can_be_tightened(pack):
+    voice, _piper, _device = pack()
+    voice.remember_spoken("Opening Notepad for you")
+
+    # her own words, heard late, with the user's own tail on the end
+    heard = "opening notepad for you and play some music"
+
+    assert voice.looks_like_echo(heard)                 # 4 of 7 words
+    assert not voice.looks_like_echo(heard, min_overlap=0.9)
+
+
+def test_her_words_are_forgotten_after_the_echo_window(pack, monkeypatch):
+    voice, _piper, _device = pack()
+    now = [1000.0]
+    monkeypatch.setattr(voice_module.time, "monotonic", lambda: now[0])
+
+    voice.remember_spoken("Opening Notepad for you.")
+    assert voice.looks_like_echo("Opening Notepad")
+
+    now[0] += config.INTERRUPT_ECHO_WINDOW_SECONDS + 1
+
+    assert not voice.looks_like_echo("Opening Notepad")
+
+
+def test_the_remembered_words_do_not_grow_forever(pack, monkeypatch):
+    voice, _piper, _device = pack()
+    now = [1000.0]
+    monkeypatch.setattr(voice_module.time, "monotonic", lambda: now[0])
+
+    voice.remember_spoken("one two three")
+    now[0] += config.INTERRUPT_ECHO_WINDOW_SECONDS + 1
+    voice.remember_spoken("four five")
+
+    assert [word for word, _stamp in voice._spoken_words] == ["four", "five"]

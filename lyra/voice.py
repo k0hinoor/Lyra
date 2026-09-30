@@ -9,19 +9,26 @@
  - sentences are synthesized in a background producer
    thread while the previous one is playing (gapless
    OutputStream, no play/stop gaps)
+
+ Barge-in support:
+ - every spoken word is remembered for a short window, so the
+   microphone can tell the user's voice from LYRA's own words
+   coming back through the speakers
 ============================================================
 """
 
+import collections
 import logging
 import os
 import queue
 import threading
+import time
 
 import numpy as np
 import requests
 
 from . import config
-from .utils import clean_for_voice, split_sentences
+from .utils import clean_for_voice, normalize, split_sentences
 
 log = logging.getLogger(__name__)
 
@@ -130,6 +137,11 @@ class Voice:
         self._active_stream = None
         self._speaking_event = threading.Event()
         self._stop_event = threading.Event()
+        # Barge-in: what she has just said, and the flag the barge-in
+        # watcher sets while it is reading the microphone.
+        self._spoken_words = collections.deque()
+        self._spoken_lock = threading.Lock()
+        self._capture_event = threading.Event()
 
         if not _SD_OK:
             print("sounddevice not available — running silent.")
@@ -300,6 +312,61 @@ class Voice:
     def is_speaking(self):
         return self._speaking_event.is_set()
 
+    @property
+    def capturing(self):
+        """True while the barge-in watcher is reading the microphone."""
+        return self._capture_event.is_set()
+
+    def start_capture(self):
+        self._capture_event.set()
+
+    def end_capture(self):
+        self._capture_event.clear()
+
+    # --------------------------------------------------------
+    # SPEAKER ECHO
+    # --------------------------------------------------------
+    # With the speakers on, the microphone hears LYRA as well as the
+    # user. Every word she speaks is remembered for a short window;
+    # a phrase that is mostly those words is her echo, not a command.
+
+    def remember_spoken(self, sentence):
+        """Record the words of one spoken sentence for echo detection."""
+
+        words = normalize(sentence or "").split()
+
+        if not words:
+            return
+
+        now = time.monotonic()
+        cutoff = now - config.INTERRUPT_ECHO_WINDOW_SECONDS
+
+        with self._spoken_lock:
+            for word in words:
+                self._spoken_words.append((word, now))
+            while self._spoken_words and self._spoken_words[0][1] < cutoff:
+                self._spoken_words.popleft()
+
+    def looks_like_echo(self, heard, min_overlap=0.5):
+        """True when enough of the heard words are ones she just said."""
+
+        words = normalize(heard or "").split()
+
+        if not words:
+            return False
+
+        cutoff = time.monotonic() - config.INTERRUPT_ECHO_WINDOW_SECONDS
+
+        with self._spoken_lock:
+            recent = {word for word, stamp in self._spoken_words if stamp >= cutoff}
+
+        if not recent:
+            return False
+
+        overlap = sum(1 for word in words if word in recent)
+
+        return overlap / len(words) >= min_overlap
+
     def beep(self):
         """Play the attention tone without overlapping speech playback."""
         with self._play_lock:
@@ -380,6 +447,11 @@ class Voice:
 
                     if not sentence:
                         continue
+
+                    # Remembered before synthesis: this is about what the
+                    # user is about to hear, and the barge-in watcher must
+                    # be able to recognise it as an echo.
+                    self.remember_spoken(sentence)
 
                     rate, pcm = self._synthesize(sentence)
 
