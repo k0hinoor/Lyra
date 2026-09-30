@@ -20,7 +20,8 @@ User data (%APPDATA%/Lyra on Windows): settings, memory, logs, models
 
 - `lyra/ear.py` loads one Faster-Whisper model per process. The default is CPU `int8`, `base.en`. Transcription passes LYRA's vocabulary as hotwords (Lyra, Brave, Chrome, YouTube, Notepad, terminate execution) so base.en stops mishearing them ("brave" → "breathe", "terminate" → "terminal").
 - `lyra/wake.py` loads the optional Vosk model once. While asleep it processes short audio clips and runs full Whisper only after a wake hit. If the Vosk model is absent, LYRA safely falls back to the previous Whisper wake gate.
-- `lyra/voice.py` loads Piper once. The voice pack download is atomic (temp file + size check + rename), so an interrupted download can never leave a corrupt model. Speaking speed follows `VOICE_SPEED` via Piper's `length_scale`. Piper's 16-bit PCM bytes are validated and converted to NumPy `int16` arrays before sounddevice playback. One lock serializes beeps and speech; streams are stopped and closed after each response.
+- `lyra/voice.py` loads Piper once. The voice pack download is atomic (temp file + size check + rename), so an interrupted download can never leave a corrupt model. Speaking speed follows `VOICE_SPEED` via Piper's `length_scale`. Piper's 16-bit PCM bytes are validated and converted to NumPy `int16` arrays before sounddevice playback. One lock serializes beeps and speech; streams are stopped and closed after each response. Every spoken sentence is remembered for a short window so the microphone can recognise LYRA's own voice coming back through the speakers.
+- Barge-in: while she speaks, a watcher thread (`lyra-barge-in`) keeps the microphone open. Sustained voice — louder than the calibrated room noise times `INTERRUPT_ENERGY_MULTIPLIER` — stops playback immediately; the rest of that phrase is captured, transcribed with the same local Whisper model and handled as the next command. Transcripts that are mostly words she just said are dropped as speaker echo, and "stop"/"be quiet" is always kept.
 - `lyra/browsers.py` finds a named browser (brave, chrome, edge, firefox) through the Windows App Paths registry key and standard install folders, and starts it with a URL as an argument list — never through a shell.
 - `lyra/transcript.py` appends every exchange (what LYRA heard, her full reply, and what handled it) to a dated transcript file under `logs/`.
 - `lyra/brain.py` keeps Ollama warm (`keep_alive`) and streams ordinary responses. The structured planner is invoked only for detected multi-step computer requests to avoid adding an LLM round trip to regular chat or known single commands.
@@ -93,6 +94,7 @@ Create `%APPDATA%\Lyra\settings.json` from `config/settings.example.json`. Suppo
   "OLLAMA_MODEL": "phi4-mini:3.8b",
   "VOICE_MODEL": "en_US-lessac-medium",
   "VOICE_SPEED": 1.15,
+  "INTERRUPT_ENERGY_MULTIPLIER": 2.0,
   "BROWSER": "",
   "OUTPUT_DEVICE": null,
   "WAKE_FUZZY_MAX_DISTANCE": 2,
@@ -108,11 +110,12 @@ Setting notes:
 
 - `VOICE_MODEL` — any English Piper voice name (`en_US-lessac-medium` is the default; `en_US-amy-medium`, `en_US-lessac-high`, `en_GB-jenny-high`, ...). Packs download atomically on first use (temp file + size check + rename), so an interrupted download cannot leave a corrupt model. Test a change with `python main.py --voice-test`.
 - `VOICE_SPEED` — speaking-speed multiplier, clamped to `0.8`–`1.5`; default `1.15` (a little faster than the Piper default). Internally passed to Piper as `length_scale = 1 / VOICE_SPEED`.
+- `INTERRUPT_ENERGY_MULTIPLIER` — how much louder than the calibrated room noise your voice must be to cut LYRA off, clamped to `1.0`–`10.0`; default `2.0`. Raise it in a room where the microphone over-hears her (or where she interrupts herself through the speakers); lower it if a quiet "stop" no longer interrupts. Only a sustained sound counts — a cough or a keyboard tap is ignored.
 - `BROWSER` — `"brave"`, `"chrome"`, `"edge"`, `"firefox"` or `""` (empty = the Windows default browser). Used by all web commands when no browser is named in the request; see Commands below.
 - `LOG_LEVEL` — detail written to `logs/lyra.log` (default `INFO`, full diagnostics for bug reports).
 - `CONSOLE_LOG_LEVEL` — what the console shows (default `WARNING`, so INFO chatter such as Whisper's audio-duration lines stays out of the conversation view).
 
-Environment variables such as `LYRA_OLLAMA_MODEL`, `LYRA_VOICE_MODEL`, `LYRA_VOICE_SPEED`, `LYRA_BROWSER`, `LYRA_CONSOLE_LOG_LEVEL`, and `LYRA_OUTPUT_DEVICE` override JSON settings. Never put API credentials in source or commit personal settings. Local state includes:
+Environment variables such as `LYRA_OLLAMA_MODEL`, `LYRA_VOICE_MODEL`, `LYRA_VOICE_SPEED`, `LYRA_INTERRUPT_ENERGY_MULTIPLIER`, `LYRA_BROWSER`, `LYRA_CONSOLE_LOG_LEVEL`, and `LYRA_OUTPUT_DEVICE` override JSON settings. Never put API credentials in source or commit personal settings. Local state includes:
 
 - `memory.json` — persistent user memory
 - `settings.json` — non-secret user preferences

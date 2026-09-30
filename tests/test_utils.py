@@ -327,3 +327,26 @@ def test_filler_utterances_are_recognised(text):
 ])
 def test_commands_and_answers_are_not_filler(text):
     assert not is_filler(text)
+
+
+# ------------------------------------------------------------
+# STOP SPEECH  ("stop", "be quiet" — said over LYRA's own voice)
+# ------------------------------------------------------------
+
+from lyra.utils import STOP_SPEECH_PHRASES, is_stop_speech  # noqa: E402
+
+
+@pytest.mark.parametrize("text", sorted(STOP_SPEECH_PHRASES))
+def test_stop_phrases_are_recognised(text):
+    assert is_stop_speech(text)
+    assert is_stop_speech(f"  {text}  ")
+
+
+@pytest.mark.parametrize("text", [
+    "wait for the download",
+    "stop the music",
+    "open notepad",
+    "",
+])
+def test_ordinary_sentences_are_not_stop_speech(text):
+    assert not is_stop_speech(text)

@@ -108,6 +108,24 @@ PHRASE_TIME_LIMIT = 15        # max seconds for one utterance
 LISTEN_TIMEOUT = 8            # give up on silence after this
 
 # ------------------------------------------------------------
+# BARGE-IN  (talking over LYRA while she speaks)
+# ------------------------------------------------------------
+# The microphone keeps listening while she talks. A sustained voice
+# (not a cough, not her own voice from the speakers) stops playback
+# immediately and the captured phrase becomes the next command.
+# Raise the multiplier on a room where the mic over-hears; lower it
+# where her own voice comes back through the speakers.
+
+INTERRUPT_ENERGY_MULTIPLIER = 2.0      # x the calibrated noise floor
+INTERRUPT_ENERGY_MULTIPLIER_MIN = 1.0
+INTERRUPT_ENERGY_MULTIPLIER_MAX = 10.0
+
+INTERRUPT_MIN_VOICE_SECONDS = 0.15     # voice long enough to be a barge-in
+INTERRUPT_SILENCE_SECONDS = 0.5        # trailing silence that ends the phrase
+INTERRUPT_PHRASE_LIMIT = 10            # never capture more than this
+INTERRUPT_ECHO_WINDOW_SECONDS = 30     # how long her own words stay "spoken"
+
+# ------------------------------------------------------------
 # SAFETY  (shutdown / restart / sleep need confirmation)
 # ------------------------------------------------------------
 
@@ -163,6 +181,21 @@ def clamp_voice_speed(value):
     return max(VOICE_SPEED_MIN, min(VOICE_SPEED_MAX, speed))
 
 
+def clamp_interrupt_multiplier(value):
+    """Parse the barge-in energy multiplier; clamp to the supported range.
+
+    Returns None for values that are not numbers at all.
+    """
+    try:
+        multiplier = float(value)
+    except (TypeError, ValueError):
+        return None
+    return max(
+        INTERRUPT_ENERGY_MULTIPLIER_MIN,
+        min(INTERRUPT_ENERGY_MULTIPLIER_MAX, multiplier),
+    )
+
+
 def normalize_browser_name(value):
     """Canonical browser name, '' for the system default, None if unknown."""
     if value is None:
@@ -176,6 +209,7 @@ _SETTINGS = {
     "OLLAMA_MODEL": "OLLAMA_MODEL",
     "VOICE_MODEL": "VOICE_MODEL",
     "VOICE_SPEED": "VOICE_SPEED",
+    "INTERRUPT_ENERGY_MULTIPLIER": "INTERRUPT_ENERGY_MULTIPLIER",
     "BROWSER": "BROWSER",
     "OUTPUT_DEVICE": "OUTPUT_DEVICE",
     "WAKE_FUZZY_MAX_DISTANCE": "WAKE_FUZZY_MAX_DISTANCE",
@@ -213,6 +247,13 @@ try:
                     if _value is None:
                         raise ValueError("must be a number between "
                                          f"{VOICE_SPEED_MIN} and {VOICE_SPEED_MAX}")
+                elif _target == "INTERRUPT_ENERGY_MULTIPLIER":
+                    _value = clamp_interrupt_multiplier(_value)
+                    if _value is None:
+                        raise ValueError(
+                            "must be a number between "
+                            f"{INTERRUPT_ENERGY_MULTIPLIER_MIN} and "
+                            f"{INTERRUPT_ENERGY_MULTIPLIER_MAX}")
                 elif _target == "BROWSER":
                     _value = normalize_browser_name(_value)
                     if _value is None:
@@ -250,6 +291,10 @@ for _key, _target in _SETTINGS.items():
                     continue
             elif _target == "VOICE_SPEED":
                 _value = clamp_voice_speed(_value)
+                if _value is None:
+                    continue
+            elif _target == "INTERRUPT_ENERGY_MULTIPLIER":
+                _value = clamp_interrupt_multiplier(_value)
                 if _value is None:
                     continue
             elif _target == "BROWSER":

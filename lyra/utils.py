@@ -198,6 +198,15 @@ SLEEP_PHRASES = {
 
 THANKS_PHRASES = {"thanks", "thank you", "thank you lyra", "thanks lyra", "shukriya"}
 
+# Said over LYRA's own speech to shut it up (barge-in). Exact matches
+# only, so "wait for the download" is never taken as a stop.
+STOP_SPEECH_PHRASES = {
+    "stop", "stop talking", "stop it", "be quiet", "quiet",
+    "shut up", "silence", "hush", "hold on", "wait",
+    "lyra stop", "stop lyra", "lyra be quiet", "lyra shut up",
+    "lyra quiet", "lyra wait",
+}
+
 # Acknowledgements and noises that are not commands. Voice mode drops these
 # instead of sending them to the chat model. Kept small and conservative:
 # "yes" / "no" stay OUT because they may answer a pending confirmation.
@@ -225,6 +234,11 @@ def is_sleep(normalized_text):
 
 def is_thanks(normalized_text):
     return normalized_text in THANKS_PHRASES
+
+
+def is_stop_speech(normalized_text):
+    """True for "stop", "be quiet", "shut up" — said over LYRA's speech."""
+    return normalized_text.strip() in STOP_SPEECH_PHRASES
 
 
 # ------------------------------------------------------------
