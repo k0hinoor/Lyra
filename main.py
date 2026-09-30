@@ -22,7 +22,7 @@ import time
 
 from lyra import config
 from lyra.memory import Memory
-from lyra.skills import Confirmation, route_with_handler
+from lyra.skills import Confirmation, apps, route_with_handler
 from lyra.transcript import Transcript
 from lyra.utils import (
     correct_name,
@@ -41,6 +41,41 @@ from lyra.utils import (
 # ============================================================
 
 log = logging.getLogger(__name__)
+
+# What the apps skill says when a name could not be launched, and the
+# follow-up that repairs it: "no, I meant Notepad".
+_APP_NOT_FOUND_PREFIX = "I couldn't find an app called"
+
+_APP_CORRECTION_RE = re.compile(
+    r"^(?:no )?(?:i said|i meant|its called|it is called|actually its called|"
+    r"im saying|i am saying)\s+(.+)$"
+)
+
+_APP_REPAIR_BLOCKERS = {"stop", "cancel", "sleep", "go to sleep"}
+
+_APP_OPEN_VERB = re.compile(r"^(?:open|launch|start|run)\s+")
+
+
+def _match_app_correction(normalized):
+    """
+    Pull the app name out of a repair after a failed open.
+
+    "no i meant notepad" / "i said open notepad please" -> "notepad",
+    and None for anything that is not a name.
+    """
+
+    match = _APP_CORRECTION_RE.match(normalized.strip())
+
+    if not match:
+        return None
+
+    candidate = strip_politeness(match.group(1).strip())
+    candidate = _APP_OPEN_VERB.sub("", candidate).strip()
+
+    if not candidate or candidate in _APP_REPAIR_BLOCKERS:
+        return None
+
+    return candidate
 
 
 def _looks_like_multistep_computer_task(text):
@@ -67,6 +102,7 @@ class Session:
         self.pending_confirmation = None
         self.transcript = Transcript()
         self.last_heard = ""
+        self.last_app_not_found = None
         from lyra.actions.executor import ActionExecutor
         self.task_executor = ActionExecutor()
         self.task_active = False
@@ -310,6 +346,22 @@ class Session:
             self.say("There is no active computer task.", handler="session")
             return False
 
+        # A misheard app name gets one repair turn: after "I couldn't find an
+        # app called X", "no, I meant Y" opens Y without re-explaining the
+        # whole command. Any other reply closes the window.
+        if self.last_app_not_found:
+            corrected = _match_app_correction(normalized)
+            self.last_app_not_found = None
+            if corrected:
+                repaired = apps.open_by_name(corrected)
+                if repaired:
+                    # A second miss re-arms the window for one more try.
+                    self.last_app_not_found = (
+                        repaired if repaired.startswith(_APP_NOT_FOUND_PREFIX) else None
+                    )
+                    self.say(repaired, handler="skill:apps")
+                    return False
+
         # memory commands (need the Memory instance, not in the skill router)
         reply, confirmation = self._handle_memory(normalized, raw)
         handler = "memory" if (reply is not None or confirmation is not None) else None
@@ -333,6 +385,9 @@ class Session:
             return False
 
         if reply is not None:
+            self.last_app_not_found = (
+                reply if reply.startswith(_APP_NOT_FOUND_PREFIX) else None
+            )
             self.say(reply, handler=handler or "skill")
             return False
 

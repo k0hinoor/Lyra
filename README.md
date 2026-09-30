@@ -169,6 +169,13 @@ Browsers and multi-step web tasks:
 - Default browser: set `BROWSER` in `settings.json` (or `LYRA_BROWSER`) and every web command that does not name a browser uses it; empty means the Windows default.
 - Run-on web tasks, handled directly (no planner round trip): “open Brave and open YouTube”, “open Brave and go to YouTube”, “open Brave and search YouTube for lofi”, “open YouTube and search for lofi”.
 
+Opening applications:
+
+- Any installed app can be opened by name. LYRA checks its own tables first (Notepad, browsers, media players), then the Start Menu: the user’s `%APPDATA%\Microsoft\Windows\Start Menu\Programs` and the machine-wide `%PROGRAMDATA%` one are searched for a matching `.lnk` shortcut, so “open davinci resolve” finds `DaVinci Resolve.lnk` and “open OBS” finds `OBS Studio (64bit).lnk` without a hand-written table entry. Uninstall, remove, repair, setup and update shortcuts are never matched, so “open davinci resolve” can never launch “Uninstall DaVinci Resolve”.
+- If nothing matches, Windows itself resolves the name. A launch that does not start anything is reported as “I couldn’t find an app called X” — LYRA never says “Opening…” for something it did not start.
+- Run-on speech: a conversational tail belongs to the chat, so “open notepad and tell me what is going on” opens Notepad and then answers. A second step belongs to the planner, so “open notepad and write about india” and “open brave and search youtube for lofi” are left to the web skill and the action planner.
+- Name repair: after “I couldn’t find an app called X”, the next turn is treated as a correction — “no I meant Notepad”, “I said Notepad”, “actually it’s called Notepad”, “I’m saying Notepad” (with or without the open verb, with or without “please”) opens the corrected app. A second miss buys exactly one more try, and any other reply closes the repair window.
+
 Window and tab controls:
 
 - “full screen”, “make it full screen”, “exit full screen” — toggles F11 (never touches brightness).

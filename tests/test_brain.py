@@ -370,6 +370,38 @@ def test_the_prompt_no_longer_says_the_chat_model_controls_the_pc(brain):
 
 
 # ------------------------------------------------------------
+# NEVER TELL THE USER LYRA CANNOT DO THINGS ON THE PC
+# The command system opens apps, searches, plays and controls the
+# desktop. Chat only used to say "I can't do that", which made a
+# working voice assistant sound helpless.
+# ------------------------------------------------------------
+
+def test_the_prompt_names_the_separate_command_system(brain):
+    prompt = brain._messages("hello")[0]["content"].lower()
+
+    assert "lyra's separate command system" in prompt
+    assert "not by this chat" in prompt
+    assert "handled elsewhere" not in prompt
+
+
+def test_the_prompt_forbids_declaring_lyra_unable_on_the_pc(brain):
+    prompt = brain._messages("hello")[0]["content"].lower()
+
+    assert "never tell the user that lyra cannot open" in prompt
+    assert "simply ask for it directly" in prompt
+    for capability in ("open", "search", "play", "control"):
+        assert capability in prompt
+
+
+def test_the_prompt_forbids_numbered_walkthroughs_for_any_system(brain):
+    prompt = brain._messages("hello")[0]["content"].lower()
+
+    assert "numbered walkthroughs for windows or any other system" in prompt
+    assert "telling them what to click defeats" in prompt
+    assert "you are not a manual" in prompt
+
+
+# ------------------------------------------------------------
 # CURRENT DATE/TIME IN EVERY REQUEST
 # ------------------------------------------------------------
 
