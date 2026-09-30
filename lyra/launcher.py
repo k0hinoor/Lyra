@@ -137,7 +137,18 @@ def main():
     parser = argparse.ArgumentParser(description="LYRA desktop launcher")
     parser.add_argument("--no-update-check", action="store_true", help="skip GitHub release check")
     parser.add_argument("--skip-llm-check", action="store_true", help="start core without validating Ollama")
+    # Flags owned by the core (main.py); parse_known_args() would forward them
+    # anyway, but declaring them keeps `--help` honest and lets --mic-test
+    # skip the Ollama check it does not need.
+    parser.add_argument("--debug-wake", action="store_true",
+                        help="print one [wake-debug] line for every captured wake clip")
+    parser.add_argument("--mic-test", action="store_true",
+                        help="run the microphone level/wake test and exit (no Ollama needed)")
     args, core_args = parser.parse_known_args()
+    if args.debug_wake:
+        core_args.append("--debug-wake")
+    if args.mic_test:
+        core_args.append("--mic-test")
     configure_logging(config.LOG_DIR, config.LOG_LEVEL, config.CONSOLE_LOG_LEVEL)
     print(f"LYRA v{LYRA_VERSION}")
     if not args.no_update_check and check_for_updates():
@@ -149,7 +160,7 @@ def main():
             print(f"Restart failed ({exc}). Start LYRA again manually to use "
                   "the updated version.")
             return 1
-    if not args.skip_llm_check and not ensure_ollama():
+    if not args.skip_llm_check and not args.mic_test and not ensure_ollama():
         return 2
     main_path = config.BASE_DIR / "main.py"
     sys.argv = [str(main_path), *core_args]

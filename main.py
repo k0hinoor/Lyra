@@ -10,7 +10,9 @@
    python main.py               wake-word mode ("Hey Lyra ...")
    python main.py --always      always-listening mode
    python main.py --text        type instead of talk (testing)
-   python main.py --devices     list audio output devices
+   python main.py --devices     list audio input/output devices
+   python main.py --mic-test    live level meter + one wake-word clip
+   python main.py --debug-wake  print every wake-gate clip and its verdict
 
  Barge-in: while she speaks a watcher thread keeps the microphone
  open, so talking over her stops playback and the captured phrase
@@ -618,6 +620,62 @@ def run_text_mode(session):
 
 
 # ============================================================
+# MICROPHONE SETUP
+# ============================================================
+
+# speech_recognition opens the microphone through PyAudio/PortAudio, whose
+# device indices are the ones `--devices` prints (and the ones
+# sounddevice/Piper uses for OUTPUT_DEVICE).
+
+
+def input_device_label(device_index=None, names=None):
+    """Human-readable name of the microphone a device index points at."""
+
+    if names is None:
+        try:
+            import speech_recognition as sr
+            names = sr.Microphone.list_microphone_names()
+        except Exception:
+            log.debug("Could not list microphones", exc_info=True)
+            names = []
+    names = list(names or [])
+
+    if device_index is None:
+        return "system default microphone"
+
+    try:
+        index = int(device_index)
+    except (TypeError, ValueError):
+        return "system default microphone"
+
+    if 0 <= index < len(names) and names[index]:
+        return f"{names[index]} (device {index})"
+    return f"device {index}"
+
+
+def apply_energy_threshold(recognizer, ceiling=None):
+    """Cap the calibrated microphone noise floor.
+
+    Returns ``(calibrated, applied)``: what adjust_for_ambient_noise measured
+    and the value actually stored on the recognizer (equal when no cap was
+    needed). A noisy room can otherwise calibrate a threshold louder than the
+    user's voice, after which listen() never fires again.
+    """
+
+    try:
+        calibrated = float(recognizer.energy_threshold)
+    except (TypeError, ValueError):
+        calibrated = None
+
+    applied = config.clamp_energy_threshold(calibrated, ceiling)
+    if applied is None:
+        applied = float(config.ENERGY_THRESHOLD_MAX if ceiling is None else ceiling)
+
+    recognizer.energy_threshold = applied
+    return calibrated, applied
+
+
+# ============================================================
 # VOICE MODE
 # ============================================================
 
@@ -627,10 +685,13 @@ def run_voice_mode(session, always_listening):
 
     from lyra.ear import Ear
     from lyra.voice import Voice
-    from lyra.wake import WakeWordDetector
+    from lyra.wake import WakeWordDetector, format_wake_debug
 
     ear = Ear()
     wake_detector = WakeWordDetector()
+    if wake_detector.hint and not always_listening:
+        # One line, only where the gate is actually used.
+        print(wake_detector.hint)
 
     voice = Voice()
     session.voice = voice
@@ -645,10 +706,17 @@ def run_voice_mode(session, always_listening):
 
     # 16 kHz mono: what Whisper wants anyway, and the rate the barge-in
     # capture labels its AudioData with.
-    with sr.Microphone(sample_rate=MIC_SAMPLE_RATE) as source:
+    with sr.Microphone(sample_rate=MIC_SAMPLE_RATE,
+                       device_index=config.INPUT_DEVICE) as source:
 
+        print(f"Input device: {input_device_label(getattr(source, 'device_index', config.INPUT_DEVICE))}")
         print("Calibrating microphone...")
         recognizer.adjust_for_ambient_noise(source, duration=0.5)
+        calibrated, applied = apply_energy_threshold(recognizer)
+        if calibrated is not None and applied < calibrated:
+            print(f"Energy threshold capped at {applied:.0f} "
+                  f"(the calibration measured {calibrated:.0f} in this room).")
+        print(f"Energy threshold: {applied:.0f}")
         print("Microphone ready.")
 
         print()
@@ -742,19 +810,27 @@ def run_voice_mode(session, always_listening):
                 wake_gate_matched = False
                 wake_gate_remainder = ""
                 if not always_listening and state == "asleep":
-                    matched, _wake_remainder, wake_transcript = wake_detector.detect(
-                        audio, fallback_transcriber=ear.transcribe_audio
+                    # transcribe_wake() pins English for this short clip (see
+                    # lyra/ear.py): auto detection on 1-2 s of audio picks the
+                    # wrong language and the wake phrase is lost.
+                    assessment = wake_detector.evaluate(
+                        audio, fallback_transcriber=ear.transcribe_wake
                     )
+                    # The wake gate rejects background chatter on purpose, so
+                    # a rejection prints nothing unless debugging is on.
+                    if config.WAKE_DEBUG:
+                        print(format_wake_debug(assessment))
+                    wake_transcript = assessment.transcript
                     # Keep the global spoken termination phrase available in
                     # lightweight mode; it is checked before the normal wake gate.
                     if is_terminate(normalize(wake_transcript)):
                         session.stop_active_task()
                         session.say("Going offline. Goodbye.", handler="session")
                         break
-                    if not matched:
+                    if not assessment.matched:
                         continue
                     wake_gate_matched = True
-                    wake_gate_remainder = _wake_remainder
+                    wake_gate_remainder = assessment.remainder
                     lightweight_wake_hit = wake_detector.lightweight
                     # Run command-quality Whisper only on the short clip after
                     # the inexpensive wake recognizer has accepted a wake phrase.
@@ -904,22 +980,180 @@ def run_voice_test(language="en"):
 
 
 # ============================================================
-# AUDIO DEVICE LISTING
+# AUDIO DEVICE LISTING  (--devices)
 # ============================================================
 
+def _device_field(device, key, default=0):
+    if isinstance(device, dict):
+        return device.get(key, default)
+    return getattr(device, key, default)
+
+
+def format_devices(devices, default_input=None, default_output=None):
+    """Lines for --devices: inputs and outputs, Windows defaults marked."""
+
+    inputs = [d for d in devices if _device_field(d, "max_input_channels", 0)]
+    outputs = [d for d in devices if _device_field(d, "max_output_channels", 0)]
+
+    lines = ["", "INPUT DEVICES (microphones)",
+             "  INPUT_DEVICE in settings.json (null = the Windows default):"]
+    for device in inputs:
+        index = _device_field(device, "index", -1)
+        mark = "   <-- DEFAULT INPUT" if index == default_input else ""
+        lines.append(f"  {index:>3}  {_device_field(device, 'name', '?')}{mark}")
+    if not inputs:
+        lines.append("  (none found)")
+
+    lines += ["", "OUTPUT DEVICES (speakers)",
+              "  OUTPUT_DEVICE in settings.json (null = the Windows default):"]
+    for device in outputs:
+        index = _device_field(device, "index", -1)
+        mark = "   <-- DEFAULT OUTPUT" if index == default_output else ""
+        lines.append(f"  {index:>3}  {_device_field(device, 'name', '?')}{mark}")
+    if not outputs:
+        lines.append("  (none found)")
+
+    lines += [
+        "",
+        "Indices are PortAudio's, which is what speech_recognition listens with.",
+        "Windows can also be told which microphone to use (Settings > System > Sound).",
+        "",
+        "If Lyra ignores you, check what a wake clip really contains:",
+        "  python main.py --mic-test",
+        "  python main.py --debug-wake",
+    ]
+    return lines
+
+
 def list_devices():
+    """--devices: list audio input/output devices and the Windows defaults."""
 
     try:
         import sounddevice as sd
-    except Exception as e:
-        print(f"sounddevice not available: {e}")
-        return
+    except Exception as error:
+        print(f"sounddevice not available: {error}")
+        return 1
 
-    print()
-    print(sd.query_devices())
-    print()
-    print("Set your output device in lyra/config.py -> OUTPUT_DEVICE = <index>")
-    print("(None = Windows default)")
+    try:
+        devices = list(sd.query_devices())
+    except Exception as error:
+        print(f"Could not list audio devices: {error}")
+        return 1
+
+    try:
+        default_input, default_output = list(sd.default.device)[:2]
+    except Exception:
+        log.debug("Could not read the default audio devices", exc_info=True)
+        default_input = default_output = None
+
+    for line in format_devices(devices, default_input=default_input,
+                               default_output=default_output):
+        print(line)
+    return 0
+
+
+# ============================================================
+# MICROPHONE TEST  (--mic-test)
+# ============================================================
+
+MIC_TEST_SECONDS = 5.0
+MIC_TEST_BAR_WIDTH = 40
+MIC_TEST_METER_INTERVAL = 0.1      # seconds between printed meter lines
+
+
+def _level_bar(level, peak=None, width=MIC_TEST_BAR_WIDTH):
+    """Text bar for the --mic-test level meter, scaled to the loudest sample."""
+
+    level = max(0.0, float(level or 0.0))
+    scale = max(level, float(peak or 0.0), 1.0)
+    filled = int(round(min(level / scale, 1.0) * width))
+    return "#" * filled + "-" * (width - filled)
+
+
+def run_mic_test(seconds=MIC_TEST_SECONDS):
+    """--mic-test: live level meter, then one clip through the wake path.
+
+    It answers the only two questions that matter when wake mode looks dead:
+    does the microphone hear the room at all, and what does the wake gate make
+    of a spoken "Hey Lyra"? Returns 0 when the clip matched the wake phrase.
+    """
+
+    import speech_recognition as sr
+
+    from lyra.ear import Ear
+    from lyra.wake import WakeWordDetector, format_wake_debug
+
+    ear = Ear()
+    wake_detector = WakeWordDetector()
+    if wake_detector.hint:
+        print(wake_detector.hint)
+
+    recognizer = sr.Recognizer()
+    recognizer.pause_threshold = config.PAUSE_THRESHOLD
+    recognizer.non_speaking_duration = config.NON_SPEAKING_DURATION
+
+    with sr.Microphone(sample_rate=MIC_SAMPLE_RATE,
+                       device_index=config.INPUT_DEVICE) as source:
+
+        print()
+        print(f"Input device: {input_device_label(getattr(source, 'device_index', config.INPUT_DEVICE))}")
+
+        print(f"Live level for {seconds:.0f} seconds — speak normally...")
+        peak = 0.0
+        deadline = time.monotonic() + seconds
+        next_line = 0.0
+        while time.monotonic() < deadline:
+            raw = source.stream.read(source.CHUNK)
+            level = _chunk_rms(raw)
+            peak = max(peak, level)
+            if time.monotonic() >= next_line:      # readable, not one line per chunk
+                next_line = time.monotonic() + MIC_TEST_METER_INTERVAL
+                print(f"\r  level {level:8.1f}  [{_level_bar(level, peak)}]", end="", flush=True)
+        print()
+        print(f"Peak level: {peak:.1f}")
+
+        if peak <= 0.0:
+            print("Nothing reached the microphone: check Windows microphone privacy "
+                  "settings and INPUT_DEVICE (`python main.py --devices`).")
+            return 1
+
+        print("Calibrating ambient noise...")
+        recognizer.adjust_for_ambient_noise(source, duration=0.5)
+        calibrated, applied = apply_energy_threshold(recognizer)
+        if calibrated is not None and applied < calibrated:
+            print(f"Energy threshold capped at {applied:.0f} "
+                  f"(the calibration measured {calibrated:.0f} in this room).")
+        print(f"Energy threshold: {applied:.0f}")
+
+        print(f"Say 'Hey {config.WAKE_WORD.capitalize()}' now...")
+        try:
+            audio = recognizer.listen(
+                source,
+                timeout=config.LISTEN_TIMEOUT,
+                phrase_time_limit=config.WAKE_WINDOW_SECONDS,
+            )
+        except sr.WaitTimeoutError:
+            print("Nothing was captured. The microphone stayed silent for "
+                  f"{config.LISTEN_TIMEOUT} seconds.")
+            return 1
+
+        # The same wake gate voice mode uses, so the printed verdict is the
+        # verdict that governs whether Lyra wakes up.
+        assessment = wake_detector.evaluate(audio, fallback_transcriber=ear.transcribe_wake)
+        print(format_wake_debug(assessment))
+        print(f"Wake engine: {assessment.engine} (language={assessment.language})")
+
+        if assessment.matched:
+            print("Wake match: YES — the wake phrase was recognised.")
+            if assessment.remainder:
+                print(f"Command after the wake phrase: '{assessment.remainder}'")
+            return 0
+
+        print("Wake match: NO — the wake phrase was not recognised in that clip.")
+        if assessment.engine == "whisper":
+            print("Install the lightweight wake model so the gate stops depending on "
+                  "Whisper: python -m lyra.setup_wake_model")
+        return 1
 
 
 # ============================================================
@@ -934,7 +1168,14 @@ def main():
     parser.add_argument("--always", action="store_true",
                         help="always-listening mode (no wake word)")
     parser.add_argument("--devices", action="store_true",
-                        help="list audio output devices and exit")
+                        help="list audio input/output devices and the Windows "
+                             "defaults, then exit")
+    parser.add_argument("--mic-test", action="store_true",
+                        help="live level meter, then one wake-word clip through "
+                             "the wake path, then exit")
+    parser.add_argument("--debug-wake", action="store_true",
+                        help="print one [wake-debug] line for every captured "
+                             "wake clip (engine, language, text, verdict)")
     parser.add_argument("--voice-test", action="store_true",
                         help="speak one sample sentence with the current "
                              "voice and speed, then exit")
@@ -942,12 +1183,17 @@ def main():
                         help="language to use for --voice-test (default: en)")
     args = parser.parse_args()
 
+    if args.debug_wake:
+        config.WAKE_DEBUG = True
+
     from lyra.logging_setup import configure_logging
     configure_logging(config.LOG_DIR, config.LOG_LEVEL, config.CONSOLE_LOG_LEVEL)
 
     if args.devices:
-        list_devices()
-        return
+        return list_devices()
+
+    if args.mic_test:
+        return run_mic_test()
 
     if args.voice_test:
         return run_voice_test(args.voice_language)

@@ -134,6 +134,8 @@ def _edit_distance(left, right, max_distance=None):
 
 
 def _is_wake_name(token, fuzzy=False):
+    """True for a known spelling of "Lyra" (optionally within fuzzy distance)."""
+
     token = token.casefold()
     if token in config.WAKE_ALIASES:
         return True
@@ -142,29 +144,92 @@ def _is_wake_name(token, fuzzy=False):
     if fuzzy:
         return min(
             (_edit_distance(token, candidate, config.WAKE_FUZZY_MAX_DISTANCE)
-             for candidate in ("lyra", "laira", "lira", "laura", "later", "leyra", "leira", "lyrah")),
+             for candidate in config.WAKE_FUZZY_CANDIDATES),
             default=99,
         ) <= config.WAKE_FUZZY_MAX_DISTANCE
     return False
 
 
+def _is_glued_wake_name(token):
+    """True for a greeting glued to the name: "heylyra", "hailyra", "hilyra".
+
+    Only one spelling step is tolerated here rather than the full fuzzy
+    distance: an ordinary word that merely starts with a greeting
+    ("hillary" -> "hi" + "llary") must not wake LYRA.
+    """
+
+    token = token.casefold()
+    allowed = min(1, config.WAKE_FUZZY_MAX_DISTANCE)
+
+    for prefix in sorted(config.WAKE_PREFIXES, key=len, reverse=True):
+        if len(token) <= len(prefix) or not token.startswith(prefix):
+            continue
+        remainder = token[len(prefix):]
+        if remainder in config.WAKE_ALIASES or remainder in config.WAKE_EXPLICIT_VARIANTS:
+            return True
+        if min(
+            (_edit_distance(remainder, candidate, allowed)
+             for candidate in config.WAKE_FUZZY_CANDIDATES),
+            default=99,
+        ) <= allowed:
+            return True
+    return False
+
+
+def _strip_wake_phrase(normalized_text):
+    """Whole-phrase mishearings of "Hey Lyra" ("hailyra", "a lyra")."""
+
+    for phrase in config.WAKE_PHRASE_ALIASES:
+        if normalized_text == phrase:
+            return True, ""
+        if normalized_text.startswith(phrase + " "):
+            return True, normalized_text[len(phrase) + 1:].strip()
+    return False, normalized_text
+
+
 def strip_wake_word(normalized_text):
     """Match a wake phrase at the utterance start without broad word lists.
 
-    Fuzzy matching is restricted to the name immediately after a wake prefix;
-    ordinary speech such as "see you later" therefore cannot wake LYRA.
+    Accepted shapes, in order:
+
+    * a whole-phrase alias, including the greeting glued to the name
+      ("hailyra", "a lyra");
+    * a greeting plus the name ("hey lyra", "hi laura", "ok lara"), where the
+      name may be a known mishearing or one fuzzy step away;
+    * a greeting glued to that name ("heylyra");
+    * the canonical name, or a native-script name, on its own.
+
+    Fuzzy matching is restricted to the name in wake position and the bare
+    form is restricted to unambiguous names, so ordinary speech such as
+    "see you later", "hey there" or "the lyrics are wrong" cannot wake LYRA.
     """
+
     tokens = normalized_text.split()
     if not tokens:
         return False, ""
 
-    if len(tokens) >= 2 and tokens[0] in config.WAKE_PREFIXES:
-        if _is_wake_name(tokens[1], fuzzy=True):
-            return True, " ".join(tokens[2:]).strip()
+    matched, remainder = _strip_wake_phrase(normalized_text)
+    if matched:
+        return True, remainder
+
+    # "a lyra" / "uh lyra": a harmless lead-in before the address.
+    start = 0
+    while start < len(tokens) - 1 and tokens[start] in config.WAKE_LEAD_FILLERS:
+        start += 1
+
+    head, rest = tokens[start], tokens[start + 1:]
+
+    if head in config.WAKE_PREFIXES:
+        if rest and _is_wake_name(rest[0], fuzzy=True):
+            return True, " ".join(rest[1:]).strip()
         return False, normalized_text
 
-    if tokens[0] == config.WAKE_WORD or tokens[0] in config.WAKE_NATIVE_NAMES:
-        return True, " ".join(tokens[1:]).strip()
+    if _is_glued_wake_name(head):
+        return True, " ".join(rest).strip()
+
+    if head in config.WAKE_BARE_NAMES:
+        return True, " ".join(rest).strip()
+
     return False, normalized_text
 
 
