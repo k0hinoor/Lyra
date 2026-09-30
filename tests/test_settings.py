@@ -161,3 +161,11 @@ def test_json_and_environment_apply_the_new_settings(tmp_path):
         "config.WHISPER_MODEL, config.WHISPER_LANGUAGE, config.AUTO_REMEMBER_PREFERENCES]))",
     ], capture_output=True, text=True, env=environment, check=True)
     assert json.loads(result.stdout) == ["hi_IN-rohan-medium", "small", "auto", False]
+
+
+def test_whisper_model_without_set_default_names_the_working_command(settings_file, downloads, capsys):
+    with pytest.raises(SystemExit) as error:
+        setup_voice.main(["--whisper-model", "small"])
+    assert error.value.code == 2
+    assert ("python -m lyra.setup_voice --language hi --set-default --whisper-model small"
+            in capsys.readouterr().err)

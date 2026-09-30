@@ -526,3 +526,47 @@ def test_a_stutter_after_the_wake_phrase_is_collapsed_before_routing(
     main.run_voice_mode(session, always_listening=False)
 
     assert session.brain.asked == ["why is the sky blue"]
+
+
+# ------------------------------------------------------------
+# --mic-test diagnostics for Hindi mode (brief §5, §8)
+# ------------------------------------------------------------
+
+def test_mic_test_prints_the_speech_language(audio_fakes, capfd, monkeypatch):
+    from lyra import config
+    monkeypatch.setattr(config, "SPEECH_LANGUAGE", "hi")
+    audio_fakes.Recognizer.listen_hook = _clip_from_listen
+
+    main.run_mic_test(seconds=0.02)
+
+    assert "Speech language: hi" in capfd.readouterr().out
+
+
+def test_mic_test_hints_at_input_device_when_it_is_unset(audio_fakes, capfd, monkeypatch):
+    from lyra import config
+    monkeypatch.setattr(config, "INPUT_DEVICE", None)
+    audio_fakes.Recognizer.listen_hook = _clip_from_listen
+
+    main.run_mic_test(seconds=0.02)
+
+    output = capfd.readouterr().out
+    assert "INPUT_DEVICE is not set" in output and "--devices" in output
+
+
+def test_mic_test_warns_about_a_clipping_microphone(audio_fakes, capfd):
+    audio_fakes.Microphone.stream_level = 20000
+    audio_fakes.Recognizer.listen_hook = _clip_from_listen
+
+    main.run_mic_test(seconds=0.02)
+
+    output = capfd.readouterr().out
+    assert "very loud" in output and "automatic gain" in output
+
+
+def test_mic_test_does_not_warn_at_a_normal_level(audio_fakes, capfd):
+    audio_fakes.Microphone.stream_level = 1500
+    audio_fakes.Recognizer.listen_hook = _clip_from_listen
+
+    main.run_mic_test(seconds=0.02)
+
+    assert "very loud" not in capfd.readouterr().out

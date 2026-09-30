@@ -28,7 +28,9 @@ def main(argv=None):
     parser.add_argument("--all-hindi", action="store_true", help="download all three Hindi packs, without changing settings")
     parser.add_argument("--set-default", action="store_true", help="save the selected language's voice to settings.json")
     parser.add_argument("--whisper-model", choices=("tiny", "base", "small", "medium", "large-v3", "turbo"),
-                        help="with --set-default, enable multilingual Whisper with automatic language detection")
+                        help="with --set-default, save the multilingual Whisper model "
+                             "(small is the practical minimum for Hindi), e.g. "
+                             "--language hi --set-default --whisper-model small")
     args = parser.parse_args(argv)
 
     if args.list:
@@ -39,7 +41,11 @@ def main(argv=None):
         print("Hindi packs are about 60–65 MB each; downloads happen only when requested or first used.")
         return 0
     if args.whisper_model and not args.set_default:
-        parser.error("--whisper-model requires --set-default")
+        parser.error(
+            "--whisper-model requires --set-default. To switch Whisper to "
+            f"{args.whisper_model!r} run: python -m lyra.setup_voice --language hi "
+            f"--set-default --whisper-model {args.whisper_model}"
+        )
     if args.all_hindi and (args.model or args.language or args.set_default):
         parser.error("--all-hindi only downloads packs; select a default separately")
 
@@ -69,6 +75,7 @@ def main(argv=None):
             settings_path = update_settings(updates)
             print("Settings saved to:", settings_path)
             print("Restart LYRA to use these settings. Whisper downloads the selected model on next voice launch.")
+            print(f"Speech language (SPEECH_LANGUAGE): {config.SPEECH_LANGUAGE}")
     except Exception as error:
         log.exception("Voice setup failed")
         print(f"Voice setup failed: {error}")

@@ -19,7 +19,7 @@ User data (%APPDATA%/Lyra on Windows): settings, memory, logs, models
 ```
 
 - `lyra/ear.py` loads one multilingual Faster-Whisper model per process. The default is CPU `int8`, `base`, with automatic language detection per utterance; `small` is recommended for more accurate Hindi at a CPU/latency cost. Transcription keeps Hindi as Hindi (not English translation) and passes English/Hindi LYRA vocabulary as hotwords. Legacy `.en` model settings are mapped to their multilingual equivalent unless English is explicitly forced.
-- `lyra/wake.py` loads the optional Vosk model once. While asleep it processes short audio clips and runs full Whisper only after a wake hit. If the Vosk model is absent, LYRA falls back to a Whisper wake gate: `Ear.transcribe_wake()` decodes the short clip with a pinned language (English unless another language is configured) instead of per-clip language detection, which too often guesses wrong on one or two seconds of audio and hands the matcher text no wake spelling can match. When that English pass contains no wake phrase and `WHISPER_LANGUAGE` is `auto`, one auto-detect retry runs so Hindi native-script names such as `हे लायरा` still work. Every wake clip can be printed with `WAKE_DEBUG`/`--debug-wake`, and a missing Vosk model prints one install hint at startup.
+- `lyra/wake.py` loads the optional Vosk model once. While asleep it processes short audio clips and runs full Whisper only after a wake hit. If the Vosk model is absent, LYRA falls back to a Whisper wake gate: `Ear.transcribe_wake()` decodes the short clip with a pinned language (English unless another language is configured) instead of per-clip language detection, which too often guesses wrong on one or two seconds of audio and hands the matcher text no wake spelling can match. When that English pass contains no wake phrase and `WHISPER_LANGUAGE` is `auto`, one auto-detect retry runs so Hindi native-script names such as `हे लायरा` still work. With `SPEECH_LANGUAGE: "hi"` the clip is decoded in Hindi first, then English, with no auto-detect pass. Every wake clip can be printed with `WAKE_DEBUG`/`--debug-wake`, and a missing Vosk model prints one install hint at startup.
 - `lyra/voice.py` caches an English and a Hindi Piper pack, loading the Hindi pack only when first needed. Devanagari and mixed-script sentences use `HINDI_VOICE_MODEL`; Latin-only English uses `VOICE_MODEL`. Unicode vowels and combining marks are preserved, and Hindi danda punctuation can stream sentences early. If the two packs have different sample rates, playback closes/reopens the stream at the correct rate instead of distorting pitch or dropping the sentence. The voice pack download is atomic (temp file + size check + rename), so an interrupted download can never leave a corrupt model. Speaking speed follows `VOICE_SPEED` via Piper's `length_scale`. Piper's 16-bit PCM bytes are validated and converted to NumPy `int16` arrays before sounddevice playback. One lock serializes beeps and speech; streams are stopped and closed after each response. Every spoken sentence is remembered for a short window so the microphone can recognise LYRA's own voice coming back through the speakers.
 - Barge-in: while she speaks, a watcher thread (`lyra-barge-in`) keeps the microphone open. Sustained voice — louder than the calibrated room noise times `INTERRUPT_ENERGY_MULTIPLIER` — stops playback immediately; the rest of that phrase is captured, transcribed with the same local Whisper model and handled as the next command. Transcripts that are mostly words she just said are dropped as speaker echo, and "stop"/"be quiet" is always kept.
 - `lyra/browsers.py` finds a named browser (brave, chrome, edge, firefox) through the Windows App Paths registry key and standard install folders, and starts it with a URL as an argument list — never through a shell.
@@ -115,13 +115,35 @@ To select another voice, replace the model ID in the setup command, for example:
 
 English still uses your existing `VOICE_MODEL`. LYRA selects a pack per sentence: Hindi/English mixed-script speech uses Hindi. Romanized Hindi alone is not reliably detectable from spelling; the chat prompt asks for Hindi replies in Devanagari so they use the Hindi voice. This is local Piper speech, not a clone of a movie character's voice.
 
+### Speech language: `SPEECH_LANGUAGE`
+
+One setting decides which language LYRA listens and answers in:
+
+| `SPEECH_LANGUAGE` | Recognition (Whisper) | Replies (chat, skills, confirmations, errors) |
+| --- | --- | --- |
+| `"hi"` (shipped default) | always Hindi | always Hindi, Hindi voice pack |
+| `"en"` | always English | English |
+| `"auto"` | as `WHISPER_LANGUAGE` says | follow the user (the behaviour before this setting existed) |
+
+Set it in `settings.json` (`"SPEECH_LANGUAGE": "auto"`) or with the `LYRA_SPEECH_LANGUAGE` environment variable, then restart. `--mic-test` prints the active value.
+
+**Trade-off of `"hi"`:** Whisper is pinned to Hindi, so English you speak is decoded *as Hindi* (usually in Devanagari transliteration). Recognised Hindi commands and the brand names below still work, and typed `--text` English is unaffected, but for a mostly-English spoken session use `"auto"` or `"en"`.
+
+In `"hi"` mode:
+
+- **Hindi commands run offline.** A small, fixed vocabulary is turned into the English command the skills already understand, without any model or network: `नोटपैड खोलो` → open notepad, `ब्रेव क्रोम यूट्यूब खोलो` → YouTube in Brave, `यूट्यूब` → open YouTube, `आवाज़ बढ़ाओ` / `आवाज़ 50 कर दो` / `आवाज़ थोड़ा कम करो`, `आवाज़ बंद करो` (mute), `चमक बढ़ाओ`, `गाना बजाओ`, `समय बताओ`, `मौसम कैसा है`, `कंप्यूटर बंद करो` (asks first; answer `हाँ` or `नहीं`), `रुको`. Brand names may be in either script (`Brave YouTube खोलो`). Anything outside that vocabulary — `मुझे कहानी सुनाओ`, `मुझे यूट्यूब पसंद है` — is never translated and goes to the chat model as you said it.
+- **Every reply is Hindi**: the fixed replies come from `lyra/messages.py` (English text there is exactly what LYRA always said), the chat model gets a Hindi-only instruction (everyday Hindi, feminine first person, no invented names), and the Hindi Piper pack speaks every sentence. If that pack is missing LYRA says so, names `python -m lyra.setup_voice --language hi`, and keeps printing text replies.
+- `सो जाओ`, `धन्यवाद`, `चुप रहो` and a transliterated "terminate execution" work like their English forms.
+
 ### Hindi recognition and wake words
 
+- For Hindi, `small` is the practical minimum: `tiny`/`base` often loop ("यूट्यूट्यूट्यूब…") or hallucinate on short Hindi commands, and LYRA logs a warning when they are used with `SPEECH_LANGUAGE: "hi"`. Switch with `python -m lyra.setup_voice --language hi --set-default --whisper-model small` (`--whisper-model` always needs `--set-default`; the model downloads on the next voice launch).
 - Use multilingual `base`, `small`, etc., **not** `base.en` or `small.en`. With `WHISPER_LANGUAGE: "auto"`, English, Hindi and mixed speech can reach the conversational model in their original language. Whisper is not a perfect recognizer, especially for short utterances, accents, background noise or frequent code-switching.
 - `small` usually improves Hindi recognition but is larger and slower on a CPU. Choose `base` in the setup command for lower latency. `WHISPER_BEAM` accepts `1`–`5` (default `3`); `1` is quicker.
 - If automatic detection keeps guessing the wrong language during an all-Hindi session, set `WHISPER_LANGUAGE` to `"hi"` in settings and restart. Use `"en"` for an intentionally English-only session.
-- Say **“Hey Lyra”** first, then speak Hindi during the follow-up window. With Whisper wake fallback, common Hindi transcriptions such as `हे लायरा` and `हे लाइरा` also work (the wake clip is decoded in English first and retried with language detection when that misses). The optional **English Vosk** wake pack still expects the English wake phrase; it does not become a Hindi acoustic model.
-- Hindi conversation, taste memory, and explicit Hindi memory commands work. Most desktop skills still expect their documented **English** commands; arbitrary Hindi desktop requests are not automatically translated into executable actions.
+- Say **“Hey Lyra”** first, then speak Hindi during the follow-up window. With Whisper wake fallback, common Hindi transcriptions such as `हे लायरा` and `हे लाइरा` also work. In `"auto"`/`"en"` the wake clip is decoded in English first and retried with language detection when that misses; in `"hi"` it is decoded in Hindi first, then in English (no language detection). The English pass is biased only with `WHISPER_WAKE_HOTWORDS` (spellings of "Hey Lyra"), never with Hindi words; `--debug-wake` prints one line per pass with the language used and which pass matched. The optional **English Vosk** wake pack still expects the English wake phrase; it does not become a Hindi acoustic model.
+- Repetition loops (`यूट्यूट्यूट्यूब…`, `hi hi hi hi hi hi`) are collapsed or, when the whole transcript is a loop, dropped instead of being answered; the wake debug line still shows the raw text.
+- Hindi conversation, taste memory, and explicit Hindi memory commands work. In `"hi"` mode the Hindi command vocabulary above runs the matching skills; other Hindi desktop requests are not translated into actions (and in `"auto"`/`"en"` the skills expect their documented **English** commands).
 
 ### Natural conversation and remembered tastes
 
@@ -188,6 +210,7 @@ Create `%APPDATA%\Lyra\settings.json` from `config/settings.example.json`. Suppo
   "WAKE_WINDOW_SECONDS": 4.0,
   "WHISPER_MODEL": "base",
   "WHISPER_LANGUAGE": "auto",
+  "SPEECH_LANGUAGE": "hi",
   "WHISPER_BEAM": 3,
   "AUTO_REMEMBER_PREFERENCES": true,
   "OLLAMA_URL": "http://localhost:11434/api/chat",
@@ -200,7 +223,9 @@ Setting notes:
 
 - `VOICE_MODEL` — any English Piper voice name (`en_US-lessac-medium` is the default; `en_US-amy-medium`, `en_US-lessac-high`, `en_GB-jenny-high`, ...). Packs download atomically on first use (temp file + size check + rename), so an interrupted download cannot leave a corrupt model. Test a change with `python main.py --voice-test`.
 - `HINDI_VOICE_MODEL` — Hindi Piper pack, default `hi_IN-priyamvada-medium`; alternatives and setup commands are above. Test with `main.py --voice-test --voice-language hi`.
-- `WHISPER_MODEL`, `WHISPER_LANGUAGE`, `WHISPER_BEAM` — multilingual recognition model, `auto` / `en` / `hi`, and decoding beam width (`1`–`5`).
+- `SPEECH_LANGUAGE` — `"hi"` (default), `"en"` or `"auto"`; see [Speech language](#speech-language-speech_language). `"auto"` restores the earlier behaviour exactly.
+- `WHISPER_MODEL`, `WHISPER_LANGUAGE`, `WHISPER_BEAM` — multilingual recognition model, `auto` / `en` / `hi` (used when `SPEECH_LANGUAGE` is `"auto"`), and decoding beam width (`1`–`5`). `small` is the practical minimum for Hindi.
+- `WHISPER_WAKE_HOTWORDS`, `WHISPER_HINDI_HOTWORDS` — Whisper bias words for the English wake pass (wake-name spellings only) and for Hindi commands (a short list of common command words).
 - `AUTO_REMEMBER_PREFERENCES` — `true` by default; capture only explicit first-person likes/dislikes. Set `false` for explicit-memory-only mode.
 - `VOICE_SPEED` — speaking-speed multiplier, clamped to `0.8`–`1.5`; default `1.15` (a little faster than the Piper default). Internally passed to Piper as `length_scale = 1 / VOICE_SPEED`.
 - `INTERRUPT_ENERGY_MULTIPLIER` — how much louder than the calibrated room noise your voice must be to cut LYRA off, clamped to `1.0`–`10.0`; default `2.0`. Raise it in a room where the microphone over-hears her (or where she interrupts herself through the speakers); lower it if a quiet "stop" no longer interrupts. Only a sustained sound counts — a cough or a keyboard tap is ignored.
@@ -211,7 +236,7 @@ Setting notes:
 - `LOG_LEVEL` — detail written to `logs/lyra.log` (default `INFO`, full diagnostics for bug reports).
 - `CONSOLE_LOG_LEVEL` — what the console shows (default `WARNING`, so INFO chatter such as Whisper's audio-duration lines stays out of the conversation view).
 
-Environment variables such as `LYRA_OLLAMA_MODEL`, `LYRA_VOICE_MODEL`, `LYRA_HINDI_VOICE_MODEL`, `LYRA_WHISPER_MODEL`, `LYRA_WHISPER_LANGUAGE`, `LYRA_WHISPER_BEAM`, `LYRA_AUTO_REMEMBER_PREFERENCES`, `LYRA_VOICE_SPEED`, `LYRA_INTERRUPT_ENERGY_MULTIPLIER`, `LYRA_BROWSER`, `LYRA_CONSOLE_LOG_LEVEL`, `LYRA_OUTPUT_DEVICE`, `LYRA_INPUT_DEVICE`, `LYRA_ENERGY_THRESHOLD_MAX`, and `LYRA_WAKE_DEBUG` override JSON settings. Never put API credentials in source or commit personal settings. Local state includes:
+Environment variables such as `LYRA_OLLAMA_MODEL`, `LYRA_VOICE_MODEL`, `LYRA_HINDI_VOICE_MODEL`, `LYRA_WHISPER_MODEL`, `LYRA_WHISPER_LANGUAGE`, `LYRA_SPEECH_LANGUAGE`, `LYRA_WHISPER_BEAM`, `LYRA_AUTO_REMEMBER_PREFERENCES`, `LYRA_VOICE_SPEED`, `LYRA_INTERRUPT_ENERGY_MULTIPLIER`, `LYRA_BROWSER`, `LYRA_CONSOLE_LOG_LEVEL`, `LYRA_OUTPUT_DEVICE`, `LYRA_INPUT_DEVICE`, `LYRA_ENERGY_THRESHOLD_MAX`, and `LYRA_WAKE_DEBUG` override JSON settings. Never put API credentials in source or commit personal settings. Local state includes:
 
 - `memory.json` — persistent user memory
 - `settings.json` — non-secret user preferences
@@ -306,6 +331,7 @@ The tests run without physical audio devices or Ollama. Hardware-dependent funct
 - **Wake word ignored / "she prints nothing when I speak":** run `.venv\Scripts\python.exe main.py --mic-test`. It shows the live level (flat at zero = the microphone, Windows privacy settings or `INPUT_DEVICE`), the calibrated energy threshold (capped at `ENERGY_THRESHOLD_MAX`), one `[wake-debug]` line for the recorded clip, and whether `strip_wake_word` matched. Then run LYRA with `--debug-wake` (or set `"WAKE_DEBUG": true`) to see every clip while it runs. The gate drops non-wake clips silently on purpose, so a misheard "Hey Lyra" is invisible without it.
 - **No lightweight wake detector:** run `.venv\Scripts\python.exe -m lyra.setup_wake_model`; without that optional model LYRA prints one startup line and falls back to Whisper wake detection (English-first on the wake clip, one auto-detect retry). Install it if wake misses are frequent — Vosk is the faster, more reliable gate.
 - **Wake word only works sometimes:** the wake clip is 1–2 seconds long and Whisper may hear "Hey Lyra" as something else (`lara`, `leera`, `lyre`, `lyrics`, `hilyra`, ...). Those spellings are already accepted after a greeting; `--debug-wake` shows what the gate really heard, and `WHISPER_MODEL: "small"` recognises short clips better than `base` at a CPU cost.
+- **Hindi commands misheard, looped or answered with an essay:** check `--mic-test` first — it prints `Speech language: hi` and the Whisper model. Use `WHISPER_MODEL: "small"` (`python -m lyra.setup_voice --language hi --set-default --whisper-model small`); `base` loops and hallucinates on Hindi. If `--mic-test` says the microphone is *very loud*, lower the input level in Windows Settings > System > Sound > Input and turn off automatic gain control / audio "enhancements" for that microphone: clipped audio is the most common cause of Whisper repetition loops. Make sure `INPUT_DEVICE` points at the microphone you actually speak into (`main.py --devices`). English-heavy sessions belong in `"auto"` (see the trade-off under [Speech language](#speech-language-speech_language)).
 - **Mic too quiet or too noisy:** `main.py --mic-test` shows the level and the threshold. If the threshold was capped, the console says so; if the microphone is wrong, pick one with `main.py --devices` and set `INPUT_DEVICE`.
 - **No/wrong speaker:** run `.venv\Scripts\python.exe main.py --devices`, set `OUTPUT_DEVICE` in `settings.json`, then restart.
 - **Piper playback error:** inspect `%APPDATA%\Lyra\logs\lyra.log`. Diagnostics include sample rate, chunk byte count, output device, and stack traces; playback requires signed 16-bit mono PCM.
@@ -328,6 +354,8 @@ lyra/wake.py                optional Vosk wake gate + Whisper fallback, wake deb
 lyra/ear.py                 persistent Faster-Whisper recognizer (hotword-biased)
 lyra/voice.py               persistent Piper model + typed sounddevice playback
 lyra/brain.py               Ollama streaming and structured plan requests
+lyra/hindi.py               offline Hindi command vocabulary -> English skill commands
+lyra/messages.py            every fixed reply, English + Hindi, t(key) by SPEECH_LANGUAGE
 lyra/browsers.py            named-browser lookup/launch for web commands
 lyra/transcript.py          dated conversation transcript writer
 lyra/logging_setup.py       quiet console + full-detail file logging

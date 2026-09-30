@@ -745,6 +745,11 @@ def run_voice_mode(session, always_listening):
                        device_index=config.INPUT_DEVICE) as source:
 
         print(f"Input device: {input_device_label(getattr(source, 'device_index', config.INPUT_DEVICE))}")
+        print(f"Speech language: {config.SPEECH_LANGUAGE} "
+              f"(Whisper model: {config.WHISPER_MODEL})")
+        if config.INPUT_DEVICE is None:
+            print("INPUT_DEVICE is not set, so the Windows default microphone is used. "
+                  "If that is the wrong one, pick an index from `python main.py --devices`.")
         print("Calibrating microphone...")
         recognizer.adjust_for_ambient_noise(source, duration=0.5)
         calibrated, applied = apply_energy_threshold(recognizer)
@@ -1122,6 +1127,11 @@ def _level_bar(level, peak=None, width=MIC_TEST_BAR_WIDTH):
     return "#" * filled + "-" * (width - filled)
 
 
+# A normal voice at arm's length peaks well below this chunk RMS; above it the
+# input is usually clipping (Windows level at 100 or aggressive AGC).
+MIC_TEST_LOUD_PEAK = 4000.0
+
+
 def run_mic_test(seconds=MIC_TEST_SECONDS):
     """--mic-test: live level meter, then one clip through the wake path.
 
@@ -1149,6 +1159,11 @@ def run_mic_test(seconds=MIC_TEST_SECONDS):
 
         print()
         print(f"Input device: {input_device_label(getattr(source, 'device_index', config.INPUT_DEVICE))}")
+        print(f"Speech language: {config.SPEECH_LANGUAGE} "
+              f"(Whisper model: {config.WHISPER_MODEL})")
+        if config.INPUT_DEVICE is None:
+            print("INPUT_DEVICE is not set, so the Windows default microphone is used. "
+                  "If that is the wrong one, pick an index from `python main.py --devices`.")
 
         print(f"Live level for {seconds:.0f} seconds — speak normally...")
         peak = 0.0
@@ -1168,6 +1183,11 @@ def run_mic_test(seconds=MIC_TEST_SECONDS):
             print("Nothing reached the microphone: check Windows microphone privacy "
                   "settings and INPUT_DEVICE (`python main.py --devices`).")
             return 1
+        if peak >= MIC_TEST_LOUD_PEAK:
+            print("The microphone is very loud (clipping distorts speech and makes "
+                  "Whisper hallucinate). Lower the level in Windows Settings > System > "
+                  "Sound > Input, and turn off any automatic gain / \"enhancements\" "
+                  "for this microphone.")
 
         print("Calibrating ambient noise...")
         recognizer.adjust_for_ambient_noise(source, duration=0.5)
