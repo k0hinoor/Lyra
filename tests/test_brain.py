@@ -467,3 +467,40 @@ def test_the_planner_prompt_describes_open_url():
 def test_the_planner_prompt_describes_literal_type_text():
     prompt = brain_module._planner_instruction("open youtube and search for lofi")
     assert '{"type": "type_text", "text": SHORT_TEXT}' in prompt
+
+
+def test_prompt_distinguishes_music_conversation_from_control_requests(brain):
+    system = brain._messages("Do you like music?")[0]["content"]
+    assert "Questions about what you like" in system
+    assert "soulful Hindi melodies" in system
+    assert "playback limitation or a volume reading" in system
+    assert "never invent human feelings" in system
+
+
+def test_prompt_uses_hindi_script_for_hindi_speech(brain):
+    system = brain._messages("मुझे हिंदी में जवाब दो")[0]["content"]
+    assert "Devanagari" in system
+    assert "Only English and Hindi speech" in system
+    assert "stock offers" in system
+
+
+def test_saved_tastes_and_current_save_status_reach_the_brain(brain):
+    brain.memory.remember_preferences([("likes", "Arijit Singh"), ("dislikes", "rap")])
+    system = brain._messages("I like Arijit Singh but don't like rap")[0]["content"]
+    assert "Preference: likes Arijit Singh." in system
+    assert "Preference: dislikes rap." in system
+    assert "successfully saved locally on THIS turn" in system
+    brain.memory.remember_preferences([])
+    system = brain._messages("What music do I like?")[0]["content"]
+    assert "No NEW preference was saved" in system
+    assert "Preference: likes Arijit Singh." in system
+
+
+def test_hindi_sentences_stream_and_are_kept_in_history(monkeypatch, brain):
+    monkeypatch.setattr(brain_module.requests, "post", lambda *a, **k: FakeResponse(lines=ollama_lines(
+        "मुझे हिंदी संगीत में मधुर धुनें बहुत पसंद हैं।", "आप किस तरह का संगीत सुनना पसंद करते हैं? ",
+    )))
+    assert list(brain.ask_stream("क्या तुम्हें संगीत पसंद है?")) == [
+        "मुझे हिंदी संगीत में मधुर धुनें बहुत पसंद हैं।", "आप किस तरह का संगीत सुनना पसंद करते हैं?",
+    ]
+    assert "मधुर धुनें" in brain.history[-1]["content"]

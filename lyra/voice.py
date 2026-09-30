@@ -28,7 +28,8 @@ import numpy as np
 import requests
 
 from . import config
-from .utils import clean_for_voice, normalize, split_sentences
+from .utils import clean_for_voice, normalize, speech_language, split_sentences
+from .voice_catalog import parse_voice_model
 
 log = logging.getLogger(__name__)
 
@@ -43,15 +44,11 @@ except Exception:
 # VOICE PACK AUTO-DOWNLOAD
 # ------------------------------------------------------------
 
-def _voice_urls():
-    """HuggingFace URLs for the .onnx model and its .json config."""
-
-    model = config.VOICE_MODEL                      # e.g. en_US-amy-medium
-    family, rest = model.split("-", 1)              # en_US | amy-medium
-    name, quality = rest.rsplit("-", 1)             # amy    | medium
-
-    base = f"{config.VOICE_REPO}/en/{family}/{name}/{quality}/{model}"
-
+def _voice_urls(model=None):
+    """HuggingFace URLs, using the voice's language (not hard-coded /en)."""
+    model = model or config.VOICE_MODEL
+    language, family, name, quality = parse_voice_model(model)
+    base = f"{config.VOICE_REPO}/{language}/{family}/{name}/{quality}/{model}"
     return base + ".onnx", base + ".onnx.json"
 
 
@@ -101,18 +98,19 @@ def _download_file(url, path):
     os.replace(temp_path, path)
 
 
-def ensure_voice_pack():
-    """Download the voice pack if missing. Returns the model path."""
-
-    model_path = config.VOICE_DIR / (config.VOICE_MODEL + ".onnx")
-    json_path = config.VOICE_DIR / (config.VOICE_MODEL + ".onnx.json")
+def ensure_voice_pack(model=None):
+    """Download an English or Hindi pack if missing; return its model path."""
+    model = model or config.VOICE_MODEL
+    model_url, json_url = _voice_urls(model)  # validate before constructing local paths
+    model_path = config.VOICE_DIR / (model + ".onnx")
+    json_path = config.VOICE_DIR / (model + ".onnx.json")
 
     if model_path.exists() and json_path.exists():
         return model_path
 
     config.VOICE_DIR.mkdir(parents=True, exist_ok=True)
 
-    for url, path in [(_voice_urls()[1], json_path), (_voice_urls()[0], model_path)]:
+    for url, path in [(json_url, json_path), (model_url, model_path)]:
 
         if path.exists():
             continue
@@ -129,8 +127,15 @@ def ensure_voice_pack():
 
 class Voice:
 
-    def __init__(self):
+    def __init__(self, language="en"):
 
+        if language not in {"en", "hi"}:
+            raise ValueError("Voice language must be en or hi")
+        self._models = {"en": config.VOICE_MODEL, "hi": config.HINDI_VOICE_MODEL}
+        self._primary_model = self._models[language]
+        self._voices = {}
+        self._failed_models = set()
+        self._voice_load_lock = threading.Lock()
         self.ok = False
         self.sample_rate = 22050
         self._play_lock = threading.RLock()
@@ -150,11 +155,12 @@ class Voice:
         try:
             from piper import PiperVoice
 
-            model_path = ensure_voice_pack()
+            model_path = ensure_voice_pack() if language == "en" else ensure_voice_pack(self._primary_model)
 
-            print("Loading Lyra's voice...")
+            print(f"Loading Lyra's voice ({self._primary_model})...")
 
             self.piper = PiperVoice.load(str(model_path))
+            self._voices[self._primary_model] = self.piper
 
             # Not every Piper voice is 22.05 kHz. Asking the loaded pack for
             # its rate keeps a 16 kHz voice from being played back too fast.
@@ -198,23 +204,47 @@ class Voice:
         except Exception:
             return None
 
-    def _piper_chunks(self, text):
-        """piper.synthesize() with VOICE_SPEED applied, tolerating old APIs."""
+    def _piper_for_text(self, text):
+        """Lazy-load each language once; never send Hindi to an English pack."""
+        language = speech_language(text)
+        model = self._models[language]
+        if model == self._primary_model:
+            return self.piper
+        with self._voice_load_lock:
+            if model in self._failed_models:
+                raise RuntimeError(f"Voice {model} is unavailable; run python -m lyra.setup_voice --language {language}")
+            if model not in self._voices:
+                try:
+                    from piper import PiperVoice
+                    path = ensure_voice_pack(model)
+                    print(f"Loading Lyra's {language} voice ({model})...")
+                    self._voices[model] = PiperVoice.load(str(path))
+                except Exception as error:
+                    self._failed_models.add(model)
+                    raise RuntimeError(
+                        f"Could not load {model}. Run python -m lyra.setup_voice "
+                        f"--language {language}, then restart LYRA. Text replies are still available."
+                    ) from error
+            return self._voices[model]
 
+    def _piper_chunks(self, text):
+        """Language-appropriate synthesis, VOICE_SPEED and old-API fallback."""
+
+        piper = self._piper_for_text(text)
         synth_config = self._synthesis_config()
 
         if synth_config is not None:
             try:
-                return self.piper.synthesize(text, config=synth_config)
+                return piper.synthesize(text, config=synth_config)
             except TypeError:
                 log.debug("Piper does not accept a config object; using kwargs")
 
         try:
-            return self.piper.synthesize(
+            return piper.synthesize(
                 text, length_scale=1.0 / float(getattr(config, "VOICE_SPEED", 1.0) or 1.0)
             )
         except TypeError:
-            return self.piper.synthesize(text)
+            return piper.synthesize(text)
 
     def _synthesize(self, text):
         """
@@ -262,7 +292,9 @@ class Voice:
             )
             chunks.append(raw)
 
-        return (rate or self.sample_rate), b"".join(chunks)
+        if not chunks:
+            raise ValueError("Piper produced no audio for non-empty speech text")
+        return rate, b"".join(chunks)
 
     # --------------------------------------------------------
     # PLAY HELPERS
@@ -407,10 +439,10 @@ class Voice:
         if not text:
             return
 
-        self.speak_stream(iter(split_sentences(text)))
+        return self.speak_stream(iter(split_sentences(text)))
 
     def speak_stream(self, sentences):
-        """Serialize all speech through the single loaded voice/device."""
+        """Serialize speech, switching local voice packs by sentence language."""
         with self._play_lock:
             self._speaking_event.set()
             try:
@@ -420,7 +452,10 @@ class Voice:
 
     def _speak_stream_locked(self, sentences):
         """Synthesize ahead while playing through one output stream."""
-        self._stop_event.clear()
+        # A canceled producer may still be finishing inference/downloads.
+        # Give each reply its own event so the next reply cannot revive it.
+        stop_event = threading.Event()
+        self._stop_event = stop_event
 
         if not self.ok:
             # Silent mode. Printing is the Session's job (it always prints
@@ -428,7 +463,7 @@ class Voice:
             # drained — printing twice would duplicate every line.
             for _sentence in sentences:
                 pass
-            return
+            return False
 
         # Replies are bounded by LYRA's output token limit; an unbounded queue
         # avoids a producer deadlock if device playback aborts mid-reply.
@@ -439,28 +474,24 @@ class Voice:
         # ----------------------------------------------------
 
         def producer():
-
             try:
                 for sentence in sentences:
-
+                    if stop_event.is_set():
+                        break
                     sentence = (sentence or "").strip()
-
                     if not sentence:
                         continue
-
-                    # Remembered before synthesis: this is about what the
-                    # user is about to hear, and the barge-in watcher must
-                    # be able to recognise it as an echo.
-                    self.remember_spoken(sentence)
-
-                    rate, pcm = self._synthesize(sentence)
-
-                    if pcm:
-                        synth_queue.put((rate, pcm))
-
+                    try:
+                        rate, pcm = self._synthesize(sentence)
+                        if pcm and not stop_event.is_set():
+                            self.remember_spoken(sentence)
+                            synth_queue.put((rate, pcm))
+                    except Exception:
+                        # A missing Hindi pack must be visible, not silent,
+                        # and must not prevent later English sentences.
+                        log.exception("Speech synthesis failed for language=%s", speech_language(sentence))
             except Exception:
-                log.exception("Piper synthesis failed")
-
+                log.exception("Speech sentence stream failed")
             finally:
                 synth_queue.put(None)
 
@@ -476,14 +507,16 @@ class Voice:
 
         stream = None
         rate = self.sample_rate
+        played_anything = False
 
         try:
 
-            while not self._stop_event.is_set():
-
-                item = synth_queue.get()
-
-                if item is None or self._stop_event.is_set():
+            while not stop_event.is_set():
+                try:
+                    item = synth_queue.get(timeout=0.1)
+                except queue.Empty:
+                    continue
+                if item is None or stop_event.is_set():
                     break
 
                 chunk_rate, pcm = item
@@ -491,6 +524,12 @@ class Voice:
                 chunk_rate = int(chunk_rate or rate)
                 if chunk_rate <= 0:
                     raise ValueError(f"Invalid Piper sample rate: {chunk_rate}")
+
+                # Different packs may use 16 kHz and 22.05 kHz in the same
+                # reply. Close/reopen instead of distorting pitch or failing.
+                if stream is not None and chunk_rate != rate:
+                    self._close_stream(stream)
+                    stream = None
 
                 if stream is None:
                     rate = chunk_rate or rate
@@ -514,17 +553,12 @@ class Voice:
                     self._active_stream = stream
                     stream.start()
 
-                if self._stop_event.is_set():
+                if stop_event.is_set():
                     break
 
-                # Piper's audio_int16_bytes is raw PCM; output streams require
-                # a typed int16 array (the root cause of bytesNNN vs int16).
-                if chunk_rate != rate:
-                    raise ValueError(
-                        f"Piper chunk rate {chunk_rate} changed within a reply "
-                        f"(stream rate {rate})"
-                    )
+                # sounddevice expects typed int16 arrays, not raw bytes.
                 stream.write(pcm_array)
+                played_anything = True
 
                 if config.VOICE_SENTENCE_SILENCE > 0:
                     silence = self._silence(rate)
@@ -534,17 +568,23 @@ class Voice:
             log.exception("Piper/sounddevice playback failed")
 
         finally:
+            stop_event.set()
             if stream is not None:
-                try:
-                    stream.stop()
-                except Exception:
-                    pass
-                try:
-                    stream.close()
-                except Exception as close_error:
-                    print(f"Voice stream close error: {close_error}")
-                finally:
-                    self._active_stream = None
+                self._close_stream(stream)
+
+        return played_anything
+
+    def _close_stream(self, stream):
+        try:
+            stream.stop()
+        except Exception:
+            pass
+        try:
+            stream.close()
+        except Exception:
+            log.exception("Voice stream close failed")
+        finally:
+            self._active_stream = None
 
     def stop(self):
         """Abort active stream or simple playback without waiting on speak()."""

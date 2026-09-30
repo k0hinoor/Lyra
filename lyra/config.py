@@ -12,6 +12,8 @@ import os
 import sys
 from pathlib import Path
 
+from .voice_catalog import parse_voice_model
+
 # ------------------------------------------------------------
 # PATHS / USER DATA
 # ------------------------------------------------------------
@@ -50,27 +52,37 @@ OLLAMA_TIMEOUT = 120          # seconds
 MAX_REPLY_TOKENS = 220        # caps rambling, keeps spoken answers quick
 HISTORY_MESSAGES = 12         # short-term context lines sent to the brain
 
+# Save only clear first-person likes/dislikes, never model-inferred facts.
+# Explicit remember/forget commands still work when this is disabled.
+AUTO_REMEMBER_PREFERENCES = True
+
 # ------------------------------------------------------------
 # EARS  (faster-whisper speech-to-text)
 # ------------------------------------------------------------
 
-# "tiny.en" = fastest | "base.en" = balanced (default) | "small.en" = most accurate
-WHISPER_MODEL = "base.en"
+# Use multilingual names (without .en) for English, Hindi and Hinglish.
+# "base" = quick on CPU | "small" = more accurate Hindi, but slower/larger.
+WHISPER_MODEL = "base"
+WHISPER_LANGUAGE = "auto"     # auto-detect each utterance; or force "en" / "hi"
 WHISPER_DEVICE = "cpu"
 WHISPER_COMPUTE = "int8"      # int8 = fast on CPU
-WHISPER_BEAM = 1              # 1 = fastest, plenty accurate for voice commands
+WHISPER_BEAM = 3              # 1 = fastest; 3–5 improves decoding at a CPU cost
 
-# Words Whisper base.en keeps mis-hearing ("brave" -> "breathe",
+# Words Whisper keeps mis-hearing ("brave" -> "breathe",
 # "terminate" -> "terminal"). Passed to faster-whisper as hotwords.
-WHISPER_HOTWORDS = "Lyra Brave Chrome YouTube Notepad terminate execution"
+WHISPER_HOTWORDS = (
+    "Lyra Brave Chrome YouTube Notepad terminate execution "
+    "लायरा लाइरा ब्रेव क्रोम यूट्यूब नोटपैड"
+)
 
 # ------------------------------------------------------------
 # VOICE  (Piper text-to-speech)
 # ------------------------------------------------------------
 
-VOICE_MODEL = "en_US-lessac-medium" # default voice; any English Piper voice works
-# Other good options:  en_US-amy-medium, en_US-lessac-high, en_GB-jenny-high,
-#                      en_US-hattie-medium
+VOICE_MODEL = "en_US-lessac-medium"       # English replies
+HINDI_VOICE_MODEL = "hi_IN-priyamvada-medium"  # Hindi / mixed-script replies
+# Hindi alternatives: hi_IN-pratham-medium, hi_IN-rohan-medium.
+# List/download choices with: python -m lyra.setup_voice --list
 
 VOICE_REPO = "https://huggingface.co/rhasspy/piper-voices/resolve/main"
 VOICE_SENTENCE_SILENCE = 0.10       # small natural gap between streamed sentences (sec)
@@ -91,10 +103,14 @@ WAKE_MODE = "wake"            # "wake" = say "Hey Lyra" first | "always" = react
 WAKE_WORD = "lyra"
 
 # How Whisper commonly mis-hears the name — all treated as the wake word.
-WAKE_ALIASES = ["lyra", "laira", "lira", "laura", "later", "leyra", "leira", "lyrah"]
+WAKE_NATIVE_NAMES = ["लायरा", "लाइरा", "लीरा", "लैरा", "लाय्रा"]
+WAKE_ALIASES = ["lyra", "laira", "lira", "laura", "later", "leyra", "leira", "lyrah"] + WAKE_NATIVE_NAMES
 WAKE_EXPLICIT_VARIANTS = ["bobby"]  # accepted only after a wake prefix, per user testing
 
-WAKE_PREFIXES = ["hey", "ok", "okay", "hi", "hello", "yo", "hay"]
+WAKE_PREFIXES = [
+    "hey", "ok", "okay", "hi", "hello", "yo", "hay",
+    "हे", "हेय", "हाय", "हेलो", "हैलो", "नमस्ते", "ओके",
+]
 
 FOLLOW_UP_SECONDS = 12        # after a reply, Lyra stays awake this long —
                               # you can keep talking without repeating the wake word
@@ -208,6 +224,8 @@ def normalize_browser_name(value):
 _SETTINGS = {
     "OLLAMA_MODEL": "OLLAMA_MODEL",
     "VOICE_MODEL": "VOICE_MODEL",
+    "HINDI_VOICE_MODEL": "HINDI_VOICE_MODEL",
+    "AUTO_REMEMBER_PREFERENCES": "AUTO_REMEMBER_PREFERENCES",
     "VOICE_SPEED": "VOICE_SPEED",
     "INTERRUPT_ENERGY_MULTIPLIER": "INTERRUPT_ENERGY_MULTIPLIER",
     "BROWSER": "BROWSER",
@@ -215,10 +233,77 @@ _SETTINGS = {
     "WAKE_FUZZY_MAX_DISTANCE": "WAKE_FUZZY_MAX_DISTANCE",
     "WAKE_WINDOW_SECONDS": "WAKE_WINDOW_SECONDS",
     "WHISPER_MODEL": "WHISPER_MODEL",
+    "WHISPER_LANGUAGE": "WHISPER_LANGUAGE",
+    "WHISPER_BEAM": "WHISPER_BEAM",
     "OLLAMA_URL": "OLLAMA_URL",
     "LOG_LEVEL": "LOG_LEVEL",
     "CONSOLE_LOG_LEVEL": "CONSOLE_LOG_LEVEL",
 }
+
+def normalize_whisper_language(value):
+    """Settings-friendly language values; None means an invalid selection."""
+    aliases = {"auto": "auto", "en": "en", "english": "en", "hi": "hi", "hindi": "hi"}
+    return aliases.get(str(value).strip().casefold())
+
+
+def parse_boolean(value):
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return {"true": True, "false": False, "1": True, "0": False}.get(value.strip().lower())
+    return None
+
+
+def _parse_setting(target, value):
+    """Use identical validation for settings.json and LYRA_* overrides."""
+    if target == "OUTPUT_DEVICE":
+        return None if value is None else int(value)
+    if target == "WAKE_FUZZY_MAX_DISTANCE":
+        value = int(value)
+        if not 0 <= value <= 2:
+            raise ValueError("must be between 0 and 2")
+    elif target == "WAKE_WINDOW_SECONDS":
+        value = float(value)
+        if not 1.0 <= value <= 8.0:
+            raise ValueError("must be between 1 and 8 seconds")
+    elif target in ("LOG_LEVEL", "CONSOLE_LOG_LEVEL"):
+        value = str(value).upper()
+        if value not in {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}:
+            raise ValueError("invalid logging level")
+    elif target == "VOICE_SPEED":
+        value = clamp_voice_speed(value)
+        if value is None:
+            raise ValueError("must be a number for speaking speed")
+    elif target == "INTERRUPT_ENERGY_MULTIPLIER":
+        value = clamp_interrupt_multiplier(value)
+        if value is None:
+            raise ValueError("must be a number for the interrupt multiplier")
+    elif target == "BROWSER":
+        value = normalize_browser_name(value)
+        if value is None:
+            raise ValueError("must be brave, chrome, edge, firefox or empty")
+    elif target == "WHISPER_BEAM":
+        value = int(value)
+        if not 1 <= value <= 5:
+            raise ValueError("must be between 1 and 5")
+    elif target == "WHISPER_LANGUAGE":
+        value = normalize_whisper_language(value)
+        if value is None:
+            raise ValueError("must be auto, en or hi")
+    elif target == "AUTO_REMEMBER_PREFERENCES":
+        value = parse_boolean(value)
+        if value is None:
+            raise ValueError("must be true or false")
+    elif target in ("VOICE_MODEL", "HINDI_VOICE_MODEL"):
+        language, *_ = parse_voice_model(value)
+        expected = "hi" if target == "HINDI_VOICE_MODEL" else "en"
+        if language != expected:
+            raise ValueError(f"{target} must be a {expected} Piper voice")
+    elif not isinstance(value, str) or not value.strip():
+        raise ValueError("must be a non-empty string")
+    return value
+
+
 try:
     with SETTINGS_FILE.open("r", encoding="utf-8") as _settings_file:
         _user_settings = json.load(_settings_file)
@@ -226,41 +311,8 @@ try:
         for _key, _target in _SETTINGS.items():
             if _key not in _user_settings:
                 continue
-            _value = _user_settings[_key]
             try:
-                if _target == "OUTPUT_DEVICE":
-                    _value = None if _value is None else int(_value)
-                elif _target == "WAKE_FUZZY_MAX_DISTANCE":
-                    _value = int(_value)
-                    if not 0 <= _value <= 2:
-                        raise ValueError("must be between 0 and 2")
-                elif _target == "WAKE_WINDOW_SECONDS":
-                    _value = float(_value)
-                    if not 1.0 <= _value <= 8.0:
-                        raise ValueError("must be between 1 and 8 seconds")
-                elif _target in ("LOG_LEVEL", "CONSOLE_LOG_LEVEL"):
-                    _value = str(_value).upper()
-                    if _value not in {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}:
-                        raise ValueError("invalid logging level")
-                elif _target == "VOICE_SPEED":
-                    _value = clamp_voice_speed(_value)
-                    if _value is None:
-                        raise ValueError("must be a number between "
-                                         f"{VOICE_SPEED_MIN} and {VOICE_SPEED_MAX}")
-                elif _target == "INTERRUPT_ENERGY_MULTIPLIER":
-                    _value = clamp_interrupt_multiplier(_value)
-                    if _value is None:
-                        raise ValueError(
-                            "must be a number between "
-                            f"{INTERRUPT_ENERGY_MULTIPLIER_MIN} and "
-                            f"{INTERRUPT_ENERGY_MULTIPLIER_MAX}")
-                elif _target == "BROWSER":
-                    _value = normalize_browser_name(_value)
-                    if _value is None:
-                        raise ValueError("must be brave, chrome, edge, firefox or empty")
-                elif not isinstance(_value, str) or not _value.strip():
-                    raise ValueError("must be a non-empty string")
-                globals()[_target] = _value
+                globals()[_target] = _parse_setting(_target, _user_settings[_key])
             except (TypeError, ValueError) as _error:
                 import logging
                 logging.getLogger(__name__).warning("Ignoring invalid setting %s: %s", _key, _error)
@@ -273,34 +325,8 @@ except (OSError, ValueError) as _error:
 for _key, _target in _SETTINGS.items():
     _env_key = "LYRA_" + _key
     if _env_key in os.environ:
-        _value = os.environ[_env_key]
         try:
-            if _target == "OUTPUT_DEVICE":
-                _value = int(_value)
-            elif _target == "WAKE_FUZZY_MAX_DISTANCE":
-                _value = int(_value)
-                if not 0 <= _value <= 2:
-                    continue
-            elif _target == "WAKE_WINDOW_SECONDS":
-                _value = float(_value)
-                if not 1.0 <= _value <= 8.0:
-                    continue
-            elif _target in ("LOG_LEVEL", "CONSOLE_LOG_LEVEL"):
-                _value = _value.upper()
-                if _value not in {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}:
-                    continue
-            elif _target == "VOICE_SPEED":
-                _value = clamp_voice_speed(_value)
-                if _value is None:
-                    continue
-            elif _target == "INTERRUPT_ENERGY_MULTIPLIER":
-                _value = clamp_interrupt_multiplier(_value)
-                if _value is None:
-                    continue
-            elif _target == "BROWSER":
-                _value = normalize_browser_name(_value)
-                if _value is None:
-                    continue
-            globals()[_target] = _value
-        except ValueError:
-            continue
+            globals()[_target] = _parse_setting(_target, os.environ[_env_key])
+        except (TypeError, ValueError) as _error:
+            import logging
+            logging.getLogger(__name__).warning("Ignoring invalid environment setting %s: %s", _env_key, _error)

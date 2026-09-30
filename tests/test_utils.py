@@ -350,3 +350,61 @@ def test_stop_phrases_are_recognised(text):
 ])
 def test_ordinary_sentences_are_not_stop_speech(text):
     assert not is_stop_speech(text)
+
+
+# ------------------------------------------------------------
+# HINDI TEXT AND WAKE PHRASES
+# ------------------------------------------------------------
+
+def test_hindi_voice_text_is_not_cleaned_away():
+    sentence = "बिल्कुल, मैं आपको हिंदी में प्रतिक्रिया दे सकता हूं।"
+    assert clean_for_voice(sentence) == sentence
+    assert clean_for_voice("**मुझे संगीत पसंद है।** 🎵") == "मुझे संगीत पसंद है।"
+
+
+def test_hindi_combining_marks_and_vowels_survive_normalization():
+    assert normalize("क्या तुम्हें संगीत पसंद है?") == "क्या तुम्हें संगीत पसंद है"
+    assert normalize("  मुझे   हिंदी में जवाब दो। ") == "मुझे हिंदी में जवाब दो"
+
+
+def test_hindi_symbols_are_spoken_in_hindi():
+    assert clean_for_voice("वॉल्यूम 15% और तापमान 30°C है।") == "वॉल्यूम 15 प्रतिशत और तापमान 30 डिग्री है।"
+
+
+@pytest.mark.parametrize("text, language", [
+    ("Hello, I like jazz.", "en"),
+    ("मुझे हिंदी संगीत पसंद है।", "hi"),
+    ("I like अरिजीत and jazz.", "hi"),
+    ("Mujhe Hindi mein jawab do", "en"),
+    ("Numbers: १२३", "en"),
+])
+def test_voice_language_is_selected_from_speech_script(text, language):
+    from lyra.utils import speech_language
+    assert speech_language(text) == language
+
+
+@pytest.mark.parametrize("phrase", ["हे लायरा", "हे लाइरा", "हेलो लायरा", "नमस्ते लाइरा", "लायरा"])
+def test_hindi_wake_names_work_without_losing_vowels(phrase):
+    assert strip_wake_word(normalize(phrase + " मुझे हिंदी में जवाब दो")) == (True, "मुझे हिंदी में जवाब दो")
+
+
+def test_hindi_name_correction_does_not_replace_a_prefix_of_another_word():
+    assert correct_name("हे लायरा!") == "हे Lyra!"
+    assert correct_name("लायराम") == "लायराम"
+
+
+def test_hindi_danda_streams_a_sentence_without_waiting_for_the_entire_reply():
+    splitter = SentenceSplitter(min_len=10)
+    assert splitter.feed("मुझे हिंदी में आपसे बात करके अच्छा लगता है।") == ["मुझे हिंदी में आपसे बात करके अच्छा लगता है।"]
+    assert splitter.feed("आप किस तरह का संगीत सुनते हैं?") == []
+    assert splitter.finish() == "आप किस तरह का संगीत सुनते हैं?"
+
+
+def test_hindi_sentences_can_be_split_without_space_after_danda():
+    assert split_sentences("यह पहली पंक्ति है।यह दूसरी पंक्ति है।", min_len=5) == [
+        "यह पहली पंक्ति है।", "यह दूसरी पंक्ति है।",
+    ]
+
+
+def test_unicode_letters_from_other_languages_are_preserved_too():
+    assert clean_for_voice("café déjà vu") == "café déjà vu"

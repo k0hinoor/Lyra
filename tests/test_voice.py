@@ -542,3 +542,196 @@ def test_the_remembered_words_do_not_grow_forever(pack, monkeypatch):
     voice.remember_spoken("four five")
 
     assert [word for word, _stamp in voice._spoken_words] == ["four", "five"]
+
+
+# ------------------------------------------------------------
+# AUTOMATIC ENGLISH / HINDI PACKS
+# ------------------------------------------------------------
+
+@pytest.fixture
+def bilingual_pack(monkeypatch, tmp_path):
+    from pathlib import Path
+    voices = {
+        config.VOICE_MODEL: FakePiperVoice(22050),
+        config.HINDI_VOICE_MODEL: FakePiperVoice(16000),
+    }
+    downloads = []
+    loads = []
+
+    def ensure(model=None):
+        model = model or config.VOICE_MODEL
+        downloads.append(model)
+        return tmp_path / (model + ".onnx")
+
+    def load(path):
+        model = Path(path).name.removesuffix(".onnx")
+        loads.append(model)
+        return voices[model]
+
+    monkeypatch.setitem(sys.modules, "piper", SimpleNamespace(PiperVoice=SimpleNamespace(load=load)))
+    monkeypatch.setattr(voice_module, "ensure_voice_pack", ensure)
+    device = FakeSoundDevice()
+    monkeypatch.setattr(voice_module, "sd", device, raising=False)
+    monkeypatch.setattr(voice_module, "_SD_OK", True)
+    return SimpleNamespace(
+        build=lambda language="en": voice_module.Voice(language=language),
+        english=voices[config.VOICE_MODEL], hindi=voices[config.HINDI_VOICE_MODEL],
+        device=device, downloads=downloads, loads=loads,
+    )
+
+
+@pytest.mark.parametrize("model", ["hi_IN-priyamvada-medium", "hi_IN-pratham-medium", "hi_IN-rohan-medium"])
+def test_hindi_download_urls_use_hi_not_the_old_hardcoded_en(model):
+    name = model.split("-")[1]
+    onnx, metadata = voice_module._voice_urls(model)
+    assert onnx == f"{config.VOICE_REPO}/hi/hi_IN/{name}/medium/{model}.onnx"
+    assert metadata == onnx + ".json"
+
+
+def test_english_download_urls_remain_compatible():
+    assert voice_module._voice_urls()[0] == (
+        f"{config.VOICE_REPO}/en/en_US/lessac/medium/en_US-lessac-medium.onnx"
+    )
+
+
+def test_hindi_text_is_sent_intact_to_a_hindi_voice(bilingual_pack):
+    pack = bilingual_pack
+    voice = pack.build()
+    text = "बिल्कुल, मैं आपको हिंदी में प्रतिक्रिया दे सकता हूं।"
+    assert voice.speak(text) is True
+    assert pack.hindi.spoken == [text]
+    assert pack.english.spoken == []
+    assert pack.device.streams[0].sample_rate == 16000
+    assert pack.device.streams[0].writes[0].size > 0
+    assert voice.looks_like_echo("मैं आपको हिंदी में प्रतिक्रिया दे सकता हूं")
+
+
+def test_a_mixed_script_sentence_uses_the_hindi_voice(bilingual_pack):
+    pack = bilingual_pack
+    voice = pack.build()
+    assert voice.speak("मुझे Arijit Singh और jazz पसंद है।") is True
+    assert pack.hindi.spoken == ["मुझे Arijit Singh और jazz पसंद है।"]
+    assert pack.english.spoken == []
+
+
+def test_each_language_is_loaded_once_and_downloaded_only_on_first_use(bilingual_pack):
+    pack = bilingual_pack
+    voice = pack.build()
+    assert pack.loads == [config.VOICE_MODEL]
+    voice.speak("Hello there.")
+    assert pack.loads == [config.VOICE_MODEL]
+    voice.speak("नमस्ते, मैं लायरा हूँ।")
+    voice.speak("मुझे संगीत पसंद है।")
+    assert pack.loads == [config.VOICE_MODEL, config.HINDI_VOICE_MODEL]
+    assert pack.downloads == [config.VOICE_MODEL, config.HINDI_VOICE_MODEL]
+
+
+def test_rate_changes_between_languages_reopen_streams_without_losing_sentences(bilingual_pack):
+    pack = bilingual_pack
+    voice = pack.build()
+    assert voice.speak_stream(iter(["English first.", "फिर हिंदी में जवाब।", "English again."])) is True
+    assert [stream.sample_rate for stream in pack.device.streams] == [22050, 16000, 22050]
+    assert all(stream.started and stream.closed and stream.stopped for stream in pack.device.streams)
+    assert pack.english.spoken == ["English first.", "English again."]
+    assert pack.hindi.spoken == ["फिर हिंदी में जवाब।"]
+    assert voice._active_stream is None
+
+
+def test_packs_at_the_same_rate_can_share_one_stream(bilingual_pack):
+    pack = bilingual_pack
+    pack.hindi.rate = 22050
+    voice = pack.build()
+    voice.speak_stream(iter(["English first.", "फिर हिंदी में जवाब।", "English again."]))
+    assert len(pack.device.streams) == 1
+    assert len(pack.device.streams[0].writes) == 6
+
+
+def test_hindi_voice_test_does_not_need_an_english_pack(bilingual_pack):
+    pack = bilingual_pack
+    voice = pack.build(language="hi")
+    assert voice.ok
+    assert pack.loads == [config.HINDI_VOICE_MODEL]
+    assert pack.downloads == [config.HINDI_VOICE_MODEL]
+    assert voice.speak("नमस्ते, मैं लायरा हूँ।") is True
+    assert pack.english.spoken == []
+    assert pack.loads == [config.HINDI_VOICE_MODEL]
+
+
+def test_a_failed_hindi_pack_is_visible_and_does_not_break_english(bilingual_pack, monkeypatch, caplog):
+    pack = bilingual_pack
+    voice = pack.build()
+    failures = []
+
+    def fail(model=None):
+        failures.append(model)
+        raise OSError("offline")
+
+    monkeypatch.setattr(voice_module, "ensure_voice_pack", fail)
+    assert voice.speak_stream(iter(["हिंदी में जवाब।", "English still works."])) is True
+    assert pack.english.spoken == ["English still works."]
+    assert pack.hindi.spoken == []
+    assert "setup_voice --language hi" in caplog.text
+    assert voice.speak("हिंदी में फिर जवाब।") is False
+    assert failures == [config.HINDI_VOICE_MODEL]  # no download retry on every sentence
+    assert voice.ok
+
+
+def test_empty_audio_from_piper_is_reported_instead_of_silent_success(pack, caplog):
+    voice, piper_voice, device = pack()
+    piper_voice.synthesize = lambda text: iter([])
+    assert voice.speak("This should have been spoken.") is False
+    assert "produced no audio" in caplog.text
+    assert device.streams == []
+
+
+def test_canceled_synthesis_is_not_revived_by_the_next_reply(bilingual_pack, monkeypatch):
+    import threading
+    pack = bilingual_pack
+    voice = pack.build()
+    entered = threading.Event()
+    release = threading.Event()
+    completed = threading.Event()
+    original_synthesize = voice._synthesize
+
+    def delayed_synthesize(text):
+        if text == "नमस्ते।":
+            entered.set()
+            release.wait(2)
+            completed.set()
+            return 16000, b"\x11\x22" * 40
+        return original_synthesize(text)
+
+    monkeypatch.setattr(voice, "_synthesize", delayed_synthesize)
+    worker = threading.Thread(target=voice.speak, args=("नमस्ते।",), daemon=True)
+    worker.start()
+    assert entered.wait(1)
+    voice.stop()
+    worker.join(1)
+    assert not worker.is_alive(), "stop must not wait for a download/inference to finish"
+    assert voice.speak("A new English reply.") is True
+    release.set()
+    assert completed.wait(1)
+    assert len(pack.device.streams) == 1
+    assert pack.english.spoken == ["A new English reply."]
+    assert not voice.looks_like_echo("नमस्ते")
+
+
+def test_hindi_packs_are_stored_separately_from_existing_english_packs(monkeypatch, tmp_path):
+    monkeypatch.setattr(config, "VOICE_DIR", tmp_path)
+    english = tmp_path / (config.VOICE_MODEL + ".onnx")
+    english.write_bytes(b"existing English")
+    calls = []
+
+    def download(url, path):
+        calls.append((url, path))
+        path.write_bytes(b"downloaded Hindi")
+
+    monkeypatch.setattr(voice_module, "_download_file", download)
+    model = "hi_IN-rohan-medium"
+    assert voice_module.ensure_voice_pack(model) == tmp_path / (model + ".onnx")
+    assert len(calls) == 2
+    assert all("/hi/hi_IN/rohan/medium/" in url for url, _path in calls)
+    assert english.read_bytes() == b"existing English"
+    calls.clear()
+    voice_module.ensure_voice_pack(model)
+    assert calls == []

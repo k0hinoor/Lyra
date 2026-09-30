@@ -482,3 +482,28 @@ def test_full_screen_never_touches_brightness(brightness, text):
 
 def test_full_volume_is_still_a_real_command(volume):
     assert media.handle("full volume") == "Volume set to 100 percent."
+
+
+# ------------------------------------------------------------
+# TASTE / PERSONAL QUESTIONS ARE CHAT, NOT VOLUME QUERIES
+# ------------------------------------------------------------
+
+@pytest.mark.parametrize("text", [
+    "do you like music", "so do you like music", "like music",
+    "i like music", "i like my music louder", "i like to turn the music up",
+    "do you enjoy music", "what music do you like", "what music", "music",
+    "i prefer quiet music", "would you like music louder",
+    "मुझे music पसंद है", "मुझे volume पसंद है", "क्या तुम्हें music पसंद है",
+])
+def test_music_opinions_never_read_or_change_volume(volume, text):
+    assert media.handle(text) is None
+    assert volume["calls"] == []
+    assert volume["level"] == 30
+
+
+def test_a_polite_would_like_command_still_controls_volume(volume):
+    assert media.handle("i would like you to turn the music up") == "Volume set to 40 percent."
+
+
+def test_a_real_music_level_query_still_reads_volume(volume):
+    assert media.handle("what is the music level") == "Volume is at 30 percent."

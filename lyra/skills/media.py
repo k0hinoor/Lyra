@@ -16,6 +16,7 @@
 import re
 
 from .. import config
+from ..utils import normalize
 
 try:
     import pyautogui
@@ -155,6 +156,16 @@ _CANNOT_HEAR = re.compile(
     r"\b(?:cant|can ?not|cannot|unable ?to) hear\b|\bnot hearing (?:you|anything)\b"
 )
 
+# Opinion/taste language must not disappear as "filler" and turn
+# "do you like music?" into a volume read, or "I like my music louder"
+# into a volume change. "I would like you to turn it up" remains a request.
+_OPINION = re.compile(
+    r"^(?:(?:so|well|actually) )?"
+    r"(?:(?:do|does|did|would) (?:you|he|she) |(?:i|you|he|she) )?"
+    r"(?:really )?(?:like|love|enjoy|prefer|hate|dislike)\b"
+)
+_READ_KNOBS = {"volume", "vol", "brightness", "loudness", "backlight"}
+
 # Spoken numbers -> digits.
 _UNITS = {
     "zero": 0, "one": 1, "two": 2, "three": 3, "four": 4, "five": 5,
@@ -201,7 +212,9 @@ def _words(text):
     """Lowercase word list, apostrophes removed ("it's" -> "its")."""
 
     cleaned = text.lower().replace("’", "").replace("'", "")
-    return [w for w in re.split(r"[^a-z0-9]+", cleaned) if w]
+    # Keep non-English words as unknown content, rather than discarding
+    # them and accidentally executing the remaining English word(s).
+    return normalize(cleaned).split()
 
 
 def _subject_of(words):
@@ -344,7 +357,7 @@ def _level_command(text):
 
     words = _words(text)
 
-    if not words:
+    if not words or _OPINION.match(" ".join(words)):
         return None
 
     content = _content(words)
@@ -441,7 +454,11 @@ def _level_command(text):
 
     # ---- just asking what it is right now ----------------------
 
-    if all(w in _READ_OK or w in _SUBJECTS or w in _TOPIC_ONLY for w in content):
+    explicit_read = bool(set(words) & (_READ_KNOBS | {"level", "levels"})) or (
+        bool(set(words) & {"how", "what", "whats", "check", "current", "tell"})
+        and bool(set(words) & set(_TOPIC_ONLY))
+    )
+    if explicit_read and all(w in _READ_OK or w in _SUBJECTS or w in _TOPIC_ONLY for w in content):
         return subject, "read", None
 
     return None

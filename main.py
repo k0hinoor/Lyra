@@ -30,6 +30,7 @@ import numpy as np
 
 from lyra import config
 from lyra.memory import Memory
+from lyra.preferences import extract_preferences, is_taste_conversation
 from lyra.skills import Confirmation, apps, route_with_handler
 from lyra.transcript import Transcript
 from lyra.utils import (
@@ -218,39 +219,45 @@ class Session:
         is not a memory command.
         """
 
-        # remember that ...
-        match = re.match(r"^(?:remember|note) that (.+)$", raw, re.IGNORECASE)
+        # Explicit English/Hindi memories are available even with automatic
+        # preference capture disabled.
+        hindi_match = re.match(r"^(?:कृपया )?याद (?:रखो|रखना)(?: कि)? (.+)$", raw.strip())
+        match = hindi_match or re.match(r"^(?:remember|note) that (.+)$", raw, re.IGNORECASE)
 
         if match:
             item = match.group(1).strip()
 
+            if item in self.memory.items:
+                return ("मुझे यह पहले से याद है।" if hindi_match else "I already knew that."), None
             if self.memory.add(item):
-                return "I'll remember that.", None
-            return "I already knew that.", None
+                return ("मैं यह याद रखूँगी।" if hindi_match else "I'll remember that."), None
+            return "I couldn't save that memory. Check the LYRA log.", None
 
         # what do you remember
-        if re.match(
+        hindi_recall = text in {"तुम्हें क्या याद है", "क्या याद है", "मेरे बारे में क्या याद है"}
+        if hindi_recall or re.match(
             r"^what (?:do you|all do you|all you) remember(?: so far| now)?$",
             text,
         ) or text in ("show memory", "list memory", "show my memory"):
 
             if not self.memory.items:
-                return "I don't remember anything yet.", None
+                return ("अभी मुझे कुछ याद नहीं है।" if hindi_recall else "I don't remember anything yet."), None
 
             listed = ". ".join(
                 f"{i + 1}. {item}" for i, item in enumerate(self.memory.items[-10:])
             )
-            return "Here's what I remember: " + listed, None
+            return ("मुझे ये बातें याद हैं: " if hindi_recall else "Here's what I remember: ") + listed, None
 
-        # forget that ...
-        match = re.match(r"^(?:forget|delete) (?:that|about) (.+)$", text)
+        # forget that ... / रैप के बारे में भूल जाओ
+        hindi_forget = re.match(r"^(.+?) के बारे में भूल (?:जाओ|जाना)$", text)
+        match = hindi_forget or re.match(r"^(?:forget|delete) (?:that|about) (.+)$", text)
 
         if match:
             removed = self.memory.remove(match.group(1))
 
             if removed:
-                return "Forgotten.", None
-            return "That wasn't in my memory.", None
+                return ("ठीक है, वह बात भूल गई हूँ।" if hindi_forget else "Forgotten."), None
+            return ("वह बात मेरी याददाश्त में नहीं थी।" if hindi_forget else "That wasn't in my memory."), None
 
         # forget everything (dangerous — confirm)
         if text in ("forget everything", "clear your memory", "clear memory", "wipe memory"):
@@ -379,7 +386,9 @@ class Session:
         reply, confirmation = self._handle_memory(normalized, raw)
         handler = "memory" if (reply is not None or confirmation is not None) else None
 
-        if reply is None and confirmation is None:
+        preferences = extract_preferences(raw)
+        taste_conversation = is_taste_conversation(raw)
+        if reply is None and confirmation is None and not taste_conversation:
             # skills (PC control) first. Run-on web patterns like
             # "open brave and open youtube" are answered directly there —
             # faster and more predictable than a planner round trip.
@@ -387,7 +396,7 @@ class Session:
             if skill_handler is not None:
                 handler = skill_handler
 
-        if reply is None and confirmation is None and _looks_like_multistep_computer_task(raw):
+        if reply is None and confirmation is None and not taste_conversation and _looks_like_multistep_computer_task(raw):
             self._start_planned_task(raw)
             return False
 
@@ -403,6 +412,12 @@ class Session:
             )
             self.say(reply, handler=handler or "skill")
             return False
+
+        # Learn only preferences the user explicitly states, before building
+        # this turn's prompt. No extra LLM request and no guessed user profile.
+        self.memory.remember_preferences(
+            preferences if config.AUTO_REMEMBER_PREFERENCES else []
+        )
 
         # brain (LLM) — streamed sentence by sentence
         self.say_stream(self.brain.ask_stream(raw.strip()), handler="chat model")
@@ -862,21 +877,28 @@ VOICE_TEST_SENTENCE = (
 )
 
 
-def run_voice_test():
-    """Speak one sample sentence with the current voice and speed."""
+HINDI_VOICE_TEST_SENTENCE = "नमस्ते! मैं लायरा हूँ। मुझे हिंदी में आपसे बात करके अच्छा लगता है।"
+
+
+def run_voice_test(language="en"):
+    """Test the chosen language without requiring Whisper or Ollama."""
 
     from lyra.voice import Voice
 
-    print(f"Voice: {config.VOICE_MODEL}")
+    model = config.HINDI_VOICE_MODEL if language == "hi" else config.VOICE_MODEL
+    print(f"Voice: {model}")
     print(f"Speed: {config.VOICE_SPEED}x")
 
-    voice = Voice()
+    voice = Voice(language="hi") if language == "hi" else Voice()
 
     if not voice.ok:
         print("Lyra's voice is not available — check the log for details.")
         return 1
 
-    voice.speak(VOICE_TEST_SENTENCE)
+    sentence = HINDI_VOICE_TEST_SENTENCE if language == "hi" else VOICE_TEST_SENTENCE
+    if voice.speak(sentence) is False:
+        print("No speech was played — check the voice pack/output device and the LYRA log.")
+        return 1
     print("Voice test finished.")
     return 0
 
@@ -916,6 +938,8 @@ def main():
     parser.add_argument("--voice-test", action="store_true",
                         help="speak one sample sentence with the current "
                              "voice and speed, then exit")
+    parser.add_argument("--voice-language", choices=("en", "hi"), default="en",
+                        help="language to use for --voice-test (default: en)")
     args = parser.parse_args()
 
     from lyra.logging_setup import configure_logging
@@ -926,7 +950,7 @@ def main():
         return
 
     if args.voice_test:
-        return run_voice_test()
+        return run_voice_test(args.voice_language)
 
     memory = Memory()
 

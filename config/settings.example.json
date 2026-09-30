@@ -1,13 +1,17 @@
 {
   "OLLAMA_MODEL": "phi4-mini:3.8b",
   "VOICE_MODEL": "en_US-lessac-medium",
+  "HINDI_VOICE_MODEL": "hi_IN-priyamvada-medium",
   "VOICE_SPEED": 1.15,
   "INTERRUPT_ENERGY_MULTIPLIER": 2.0,
   "BROWSER": "",
   "OUTPUT_DEVICE": null,
   "WAKE_FUZZY_MAX_DISTANCE": 2,
   "WAKE_WINDOW_SECONDS": 4.0,
-  "WHISPER_MODEL": "base.en",
+  "WHISPER_MODEL": "base",
+  "WHISPER_LANGUAGE": "auto",
+  "WHISPER_BEAM": 3,
+  "AUTO_REMEMBER_PREFERENCES": true,
   "OLLAMA_URL": "http://localhost:11434/api/chat",
   "LOG_LEVEL": "INFO",
   "CONSOLE_LOG_LEVEL": "WARNING"
