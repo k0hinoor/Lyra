@@ -63,3 +63,46 @@ def test_failed_update_rolls_back_replaced_files(monkeypatch, tmp_path):
         updater.download_and_install(release, app_dir=app_dir, data_dir=data_dir)
     assert (app_dir / "main.py").read_text(encoding="utf-8") == "old main"
     assert (app_dir / "lyra" / "core.py").read_text(encoding="utf-8") == "old core"
+
+
+def test_update_check_fails_fast_when_network_hangs(monkeypatch):
+    import time
+    import pytest
+    from lyra import updater
+
+    monkeypatch.setattr(updater, "_fetch_latest_release_json", lambda timeout: time.sleep(5))
+    start = time.monotonic()
+    with pytest.raises(TimeoutError):
+        updater.check_latest_release(deadline=0.2)
+    assert time.monotonic() - start < 2
+
+
+def test_update_check_uses_connect_read_timeout_tuple(monkeypatch):
+    from lyra import updater
+
+    seen = {}
+
+    class Resp:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"tag_name": "v0.0.0"}
+
+    def fake_get(url, timeout, headers):
+        seen["timeout"] = timeout
+        return Resp()
+
+    monkeypatch.setattr(updater.requests, "get", fake_get)
+    assert updater.check_latest_release() is None
+    assert isinstance(seen["timeout"], tuple) and len(seen["timeout"]) == 2
+
+
+def test_launcher_continues_when_update_check_times_out(monkeypatch):
+    from lyra import launcher, updater
+
+    def boom(*a, **k):
+        raise TimeoutError("slow network")
+
+    monkeypatch.setattr(updater, "check_latest_release", boom)
+    assert launcher.check_for_updates() is False
