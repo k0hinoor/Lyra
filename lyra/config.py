@@ -91,6 +91,9 @@ VOICE_SPEED = 1.15                  # speaking speed multiplier (clamped to 0.8-
 VOICE_SPEED_MIN = 0.8
 VOICE_SPEED_MAX = 1.5
 
+INPUT_DEVICE = None                 # None = Windows default microphone. Run
+                                    # `python main.py --devices` and set the
+                                    # index of your real microphone (e.g. 1).
 OUTPUT_DEVICE = None                # None = Windows default output.
                                     # Run `python main.py --devices` to list
                                     # yours, then set the index (e.g. 5).
@@ -230,6 +233,7 @@ _SETTINGS = {
     "INTERRUPT_ENERGY_MULTIPLIER": "INTERRUPT_ENERGY_MULTIPLIER",
     "BROWSER": "BROWSER",
     "OUTPUT_DEVICE": "OUTPUT_DEVICE",
+    "INPUT_DEVICE": "INPUT_DEVICE",
     "WAKE_FUZZY_MAX_DISTANCE": "WAKE_FUZZY_MAX_DISTANCE",
     "WAKE_WINDOW_SECONDS": "WAKE_WINDOW_SECONDS",
     "WHISPER_MODEL": "WHISPER_MODEL",
@@ -256,7 +260,7 @@ def parse_boolean(value):
 
 def _parse_setting(target, value):
     """Use identical validation for settings.json and LYRA_* overrides."""
-    if target == "OUTPUT_DEVICE":
+    if target in ("OUTPUT_DEVICE", "INPUT_DEVICE"):
         return None if value is None else int(value)
     if target == "WAKE_FUZZY_MAX_DISTANCE":
         value = int(value)

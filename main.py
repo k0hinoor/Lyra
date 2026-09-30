@@ -69,6 +69,9 @@ _APP_OPEN_VERB = re.compile(r"^(?:open|launch|start|run)\s+")
 # barge-in audio is labelled with.
 MIC_SAMPLE_RATE = 16000
 
+# Set by --debug-wake: print what the wake gate heard for every clip.
+DEBUG_WAKE = False
+
 
 def _match_app_correction(normalized):
     """
@@ -645,11 +648,13 @@ def run_voice_mode(session, always_listening):
 
     # 16 kHz mono: what Whisper wants anyway, and the rate the barge-in
     # capture labels its AudioData with.
-    with sr.Microphone(sample_rate=MIC_SAMPLE_RATE) as source:
+    with sr.Microphone(device_index=config.INPUT_DEVICE,
+                       sample_rate=MIC_SAMPLE_RATE) as source:
 
         print("Calibrating microphone...")
         recognizer.adjust_for_ambient_noise(source, duration=0.5)
-        print("Microphone ready.")
+        print(f"Microphone ready (input device: {_input_device_name(config.INPUT_DEVICE)}, "
+              f"noise floor {recognizer.energy_threshold:.0f}).")
 
         print()
         print("====================================")
@@ -751,6 +756,9 @@ def run_voice_mode(session, always_listening):
                         session.stop_active_task()
                         session.say("Going offline. Goodbye.", handler="session")
                         break
+                    if DEBUG_WAKE:
+                        print(f"[wake-debug] heard: {wake_transcript!r} -> "
+                              f"{'WAKE' if matched else 'no wake word'}")
                     if not matched:
                         continue
                     wake_gate_matched = True
@@ -907,6 +915,16 @@ def run_voice_test(language="en"):
 # AUDIO DEVICE LISTING
 # ============================================================
 
+def _input_device_name(index):
+    """Human-readable name of the selected (or default) input device."""
+    try:
+        import sounddevice as sd
+        info = sd.query_devices(index, "input") if index is not None else sd.query_devices(kind="input")
+        return f"{info['name']}" + (f" [#{index}]" if index is not None else " [default]")
+    except Exception:
+        return f"#{index}" if index is not None else "default"
+
+
 def list_devices():
 
     try:
@@ -918,8 +936,77 @@ def list_devices():
     print()
     print(sd.query_devices())
     print()
-    print("Set your output device in lyra/config.py -> OUTPUT_DEVICE = <index>")
-    print("(None = Windows default)")
+    try:
+        default_in, default_out = sd.default.device
+        print(f"Windows default input : {default_in}")
+        print(f"Windows default output: {default_out}")
+    except Exception:
+        pass
+    print()
+    print("Lines marked with '>' are the current defaults; the 'in'/'out' counts")
+    print("show which devices can record / play.")
+    print("Pick your real microphone (in > 0) and set it in settings.json:")
+    print('  "INPUT_DEVICE": <index>      "OUTPUT_DEVICE": <index>')
+    print("Test it with:  python main.py --mic-test")
+
+
+def run_mic_test(seconds=6):
+    """Show a live mic level meter, then transcribe one wake-window clip."""
+
+    import speech_recognition as sr
+
+    from lyra.ear import Ear
+
+    print()
+    print(f"Input device: {_input_device_name(config.INPUT_DEVICE)}")
+    with sr.Microphone(device_index=config.INPUT_DEVICE,
+                       sample_rate=MIC_SAMPLE_RATE) as source:
+        recognizer = sr.Recognizer()
+        print("Stay quiet for a moment (measuring room noise)...")
+        recognizer.adjust_for_ambient_noise(source, duration=1.0)
+        floor = recognizer.energy_threshold
+        print(f"Noise floor / speech threshold: {floor:.0f}")
+        print()
+        print(f"Speak normally for {seconds} seconds — the bar should jump when you talk:")
+        end = time.time() + seconds
+        peak = 0.0
+        chunk = source.CHUNK
+        while time.time() < end:
+            raw = source.stream.read(chunk)
+            level = _chunk_rms(raw)
+            peak = max(peak, level)
+            bar = "#" * min(60, int(level / max(floor, 1) * 10))
+            print(f"\r{level:7.0f} |{bar:<60}|", end="", flush=True)
+        print()
+        print()
+        print(f"Peak level: {peak:.0f}   (threshold {floor:.0f})")
+        if peak < 50:
+            print("!! Almost no signal. Wrong input device, muted mic, or Windows "
+                  "microphone privacy is blocking apps.")
+        elif peak < floor:
+            print("!! Your voice never crossed the speech threshold. Move closer, "
+                  "raise the mic level in Windows, or pick another INPUT_DEVICE.")
+        else:
+            print("OK: the microphone is picking up your voice.")
+
+        ear = Ear()
+        print()
+        print("Now say: \"Hey Lyra, what time is it?\" ...")
+        try:
+            audio = recognizer.listen(source, timeout=8,
+                                      phrase_time_limit=config.WAKE_WINDOW_SECONDS)
+        except sr.WaitTimeoutError:
+            print("Nothing heard for 8 seconds. Lyra cannot hear speech on this input.")
+            return 1
+        heard = ear.transcribe_audio(audio)
+        matched, remainder = strip_wake_word(normalize(heard))
+        print(f"Whisper heard : {heard!r}")
+        print(f"Wake word     : {'MATCHED' if matched else 'NOT matched'}"
+              + (f"  (command: {remainder!r})" if matched and remainder else ""))
+        if not matched:
+            print("If the text is close to 'Hey Lyra', add that spelling to "
+                  "WAKE_ALIASES in lyra/config.py.")
+    return 0
 
 
 # ============================================================
@@ -934,7 +1021,12 @@ def main():
     parser.add_argument("--always", action="store_true",
                         help="always-listening mode (no wake word)")
     parser.add_argument("--devices", action="store_true",
-                        help="list audio output devices and exit")
+                        help="list audio input/output devices and exit")
+    parser.add_argument("--mic-test", action="store_true",
+                        help="check that the microphone hears you and that "
+                             "'Hey Lyra' is recognised, then exit")
+    parser.add_argument("--debug-wake", action="store_true",
+                        help="print what the wake gate hears for every clip")
     parser.add_argument("--voice-test", action="store_true",
                         help="speak one sample sentence with the current "
                              "voice and speed, then exit")
@@ -951,6 +1043,12 @@ def main():
 
     if args.voice_test:
         return run_voice_test(args.voice_language)
+
+    if args.mic_test:
+        return run_mic_test()
+
+    global DEBUG_WAKE
+    DEBUG_WAKE = args.debug_wake
 
     memory = Memory()
 
