@@ -26,17 +26,33 @@ class Ear:
 
         from faster_whisper import WhisperModel
 
-        print(f"Loading Whisper ({config.WHISPER_MODEL})...")
+        self.language = None if config.WHISPER_LANGUAGE == "auto" else config.WHISPER_LANGUAGE
+        model_name = config.WHISPER_MODEL
+        # Existing Windows settings may still contain base.en. That model
+        # can never understand Hindi, even with language="hi" requested.
+        if self.language != "en" and model_name in {"tiny.en", "base.en", "small.en", "medium.en"}:
+            multilingual = model_name.removesuffix(".en")
+            log.warning(
+                "%s is English-only; using multilingual %s for WHISPER_LANGUAGE=%s. "
+                "Update WHISPER_MODEL in settings.json to remove .en.",
+                model_name, multilingual, config.WHISPER_LANGUAGE,
+            )
+            model_name = multilingual
+        self.model_name = model_name
+        print(f"Loading Whisper ({model_name}, language={config.WHISPER_LANGUAGE})...")
 
         self.model = WhisperModel(
-            config.WHISPER_MODEL,
+            model_name,
             device=config.WHISPER_DEVICE,
             compute_type=config.WHISPER_COMPUTE,
         )
 
         # tiny warm-up so the first real command is not slower
         silence = np.zeros(8000, dtype=np.float32)
-        list(self.model.transcribe(silence, language="en"))
+        segments, _info = self.model.transcribe(
+            silence, language=self.language or "en", task="transcribe",
+        )
+        list(segments)
 
         print("Whisper ready.")
 
@@ -59,11 +75,18 @@ class Ear:
             log.exception("Could not read microphone audio")
             return ""
 
-        audio_array = np.frombuffer(raw, dtype=np.int16)
-        audio_array = audio_array.astype(np.float32) / 32768.0
+        try:
+            audio_array = np.frombuffer(raw, dtype=np.int16)
+            if not audio_array.size:
+                return ""
+            audio_array = audio_array.astype(np.float32) / 32768.0
+        except (TypeError, ValueError):
+            log.exception("Invalid microphone PCM buffer")
+            return ""
 
         kwargs = dict(
-            language="en",
+            language=self.language,
+            task="transcribe",  # keep Hindi as Hindi; do not translate it to English
             temperature=0.0,
             beam_size=config.WHISPER_BEAM,
             vad_filter=True,
@@ -90,7 +113,7 @@ class Ear:
                 segments, _info = self.model.transcribe(audio_array, **kwargs)
 
             text = " ".join(segment.text for segment in segments)
-
+            log.debug("Whisper detected language=%s", getattr(_info, "language", "unknown"))
             return text.strip()
 
         except Exception:

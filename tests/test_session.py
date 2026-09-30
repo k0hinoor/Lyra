@@ -580,3 +580,118 @@ def test_voice_test_speaks_with_the_current_voice_and_speed(monkeypatch, capfd):
     assert rc == 0
     assert str(config.VOICE_MODEL) in out
     assert spoken == [main.VOICE_TEST_SENTENCE]
+
+
+# ------------------------------------------------------------
+# NATURAL MUSIC CONVERSATION AND PERSISTENT TASTES
+# ------------------------------------------------------------
+
+@pytest.mark.parametrize("text", [
+    "So do you like music?", "I asked do you like music?", "What's your music taste?",
+    "क्या तुम्हें संगीत पसंद है?",
+])
+def test_personal_music_questions_reach_chat_without_touching_volume(session, fake_brain, pc, text):
+    session.process(text)
+    assert fake_brain.asked == [text]
+    assert pc.volume["calls"] == []
+    assert pc.pyauto.calls == []
+    assert session.memory.items == []
+
+
+def test_music_tastes_are_saved_and_still_get_a_natural_chat_reply(session, fake_brain, pc):
+    from lyra.memory import Memory
+    session.process("I like Arijit Singh but I don't like rap")
+    assert fake_brain.asked == ["I like Arijit Singh but I don't like rap"]
+    assert pc.volume["calls"] == []
+    assert Memory().items == ["Preference: likes Arijit Singh.", "Preference: dislikes rap."]
+    session.process("What music do I like?")
+    assert fake_brain.asked[-1] == "What music do I like?"
+    assert session.memory.preference_updates == []  # no stale current-turn save claim
+
+
+def test_hindi_tastes_are_saved_and_the_actual_hindi_is_sent_to_chat(session, fake_brain):
+    text = "मुझे अरिजीत के गाने पसंद हैं लेकिन मुझे रैप पसंद नहीं है।"
+    session.process(text)
+    assert fake_brain.asked == [text]
+    assert session.memory.items == ["Preference: likes अरिजीत के गाने.", "Preference: dislikes रैप."]
+
+
+def test_preference_capture_can_be_disabled_without_breaking_conversation(session, fake_brain, monkeypatch):
+    from lyra import config
+    monkeypatch.setattr(config, "AUTO_REMEMBER_PREFERENCES", False)
+    session.process("I like jazz")
+    assert session.memory.items == []
+    assert fake_brain.asked == ["I like jazz"]
+    session.process("remember that I like jazz")
+    assert session.memory.items == ["I like jazz"]
+
+
+def test_a_preference_containing_action_verbs_is_not_executed_as_a_plan(session, fake_brain, pc):
+    session.process("I like to open notepad and write stories")
+    assert fake_brain.asked == ["I like to open notepad and write stories"]
+    assert pc.started == []
+    assert pc.pyauto.calls == []
+
+
+def test_tastes_can_be_forgotten_from_the_session(session):
+    session.process("I like jazz but I don't like rap")
+    session.process("forget about rap")
+    assert session.memory.items == ["Preference: likes jazz."]
+
+
+def test_a_real_volume_command_still_works_after_music_chat(session, pc):
+    session.process("Do you like music?")
+    session.process("set volume to 15")
+    assert pc.volume["level"] == 15
+    assert pc.volume["calls"] == [15]
+
+
+def test_voice_test_can_audition_hindi_without_loading_english(monkeypatch, capfd):
+    from lyra import config, voice as voice_module
+    calls = []
+
+    class HindiVoice:
+        def __init__(self, language):
+            self.ok = True
+            calls.append(language)
+
+        def speak(self, text):
+            calls.append(text)
+            return True
+
+    monkeypatch.setattr(voice_module, "Voice", HindiVoice)
+    assert main.run_voice_test("hi") == 0
+    assert calls == ["hi", main.HINDI_VOICE_TEST_SENTENCE]
+    assert config.HINDI_VOICE_MODEL in capfd.readouterr().out
+
+
+def test_voice_test_reports_no_audio_instead_of_success(monkeypatch, capfd):
+    from lyra import voice as voice_module
+
+    class BrokenVoice:
+        def __init__(self):
+            self.ok = True
+
+        def speak(self, text):
+            return False
+
+    monkeypatch.setattr(voice_module, "Voice", BrokenVoice)
+    assert main.run_voice_test() == 1
+    assert "No speech was played" in capfd.readouterr().out
+
+
+def test_explicit_hindi_memory_and_recall_commands(session, capfd):
+    session.process("याद रखना कि मेरा पसंदीदा गायक अरिजीत है")
+    assert session.memory.items == ["मेरा पसंदीदा गायक अरिजीत है"]
+    assert "मैं यह याद रखूँगी" in capfd.readouterr().out
+    session.process("तुम्हें क्या याद है?")
+    assert "अरिजीत" in capfd.readouterr().out
+    session.process("अरिजीत के बारे में भूल जाओ")
+    assert session.memory.items == []
+
+
+def test_an_explicit_memory_write_failure_is_not_claimed_as_success(session, monkeypatch, capfd):
+    monkeypatch.setattr(session.memory, "_save", lambda: False)
+    session.process("remember that I like jazz")
+    assert session.memory.items == []
+    assert "couldn't save" in capfd.readouterr().out

@@ -135,3 +135,53 @@ def test_the_vocabulary_hotwords_are_configured(word):
 
 def test_default_voice_model_is_lessac():
     assert config.VOICE_MODEL == "en_US-lessac-medium"
+
+
+# ------------------------------------------------------------
+# MULTILINGUAL SETTINGS
+# ------------------------------------------------------------
+
+@pytest.mark.parametrize("value, expected", [
+    ("auto", "auto"), ("HI", "hi"), ("Hindi", "hi"), ("en", "en"), ("English", "en"),
+    ("klingon", None), (None, None), ("", None),
+])
+def test_whisper_language_settings_are_normalized(value, expected):
+    assert config.normalize_whisper_language(value) == expected
+
+
+@pytest.mark.parametrize("value, expected", [
+    (True, True), (False, False), ("true", True), ("false", False),
+    ("1", True), ("0", False), ("yes please", None), (None, None),
+])
+def test_auto_memory_setting_uses_a_real_boolean(value, expected):
+    assert config.parse_boolean(value) is expected
+
+
+@pytest.mark.parametrize("setting, value", [
+    ("HINDI_VOICE_MODEL", "en_US-lessac-medium"),
+    ("VOICE_MODEL", "hi_IN-pratham-medium"),
+    ("HINDI_VOICE_MODEL", "../hi_IN-pratham-medium"),
+    ("WHISPER_LANGUAGE", "es"),
+    ("AUTO_REMEMBER_PREFERENCES", "sometimes"),
+])
+def test_invalid_bilingual_settings_are_rejected(setting, value):
+    with pytest.raises(ValueError):
+        config._parse_setting(setting, value)
+
+
+def test_defaults_support_english_and_hindi_without_english_only_whisper():
+    assert config.WHISPER_MODEL == "base"
+    assert config.WHISPER_LANGUAGE == "auto"
+    assert config.HINDI_VOICE_MODEL == "hi_IN-priyamvada-medium"
+    assert config.AUTO_REMEMBER_PREFERENCES is True
+
+
+@pytest.mark.parametrize("value, expected", [(1, 1), ("3", 3), (5, 5)])
+def test_whisper_beam_size_can_be_tuned_for_cpu_latency(value, expected):
+    assert config._parse_setting("WHISPER_BEAM", value) == expected
+
+
+@pytest.mark.parametrize("value", [0, 6, "fast"])
+def test_invalid_whisper_beam_sizes_are_rejected(value):
+    with pytest.raises(ValueError):
+        config._parse_setting("WHISPER_BEAM", value)

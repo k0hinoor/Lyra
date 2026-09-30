@@ -8,6 +8,7 @@
 """
 
 import re
+import unicodedata
 
 from . import config
 
@@ -18,8 +19,14 @@ from . import config
 def normalize(text):
     """Lowercase, strip punctuation (keep apostrophes), collapse spaces."""
 
-    text = text.lower().strip()
-    text = re.sub(r"[^\w\s']+", " ", text)
+    text = unicodedata.normalize("NFC", text).lower().strip()
+    # Python's \w excludes combining marks. Dropping those destroys Hindi
+    # vowels/nuktas (पसंद -> पस द) before wake matching or command routing.
+    text = "".join(
+        char if char.isalnum() or char in "_'" or char.isspace()
+        or unicodedata.category(char).startswith("M") else " "
+        for char in text
+    )
     text = re.sub(r"\s+", " ", text)
 
     return text.strip()
@@ -90,7 +97,9 @@ def strip_politeness(text):
 # ------------------------------------------------------------
 
 _NAME_PATTERN = re.compile(
-    r"\b(" + "|".join(config.WAKE_ALIASES + ["liara", "yara"]) + r")\b",
+    r"(?<![\w\u0900-\u097f])("
+    + "|".join(re.escape(name) for name in config.WAKE_ALIASES + ["liara", "yara"])
+    + r")(?![\w\u0900-\u097f])",
     re.IGNORECASE
 )
 
@@ -154,7 +163,7 @@ def strip_wake_word(normalized_text):
             return True, " ".join(tokens[2:]).strip()
         return False, normalized_text
 
-    if tokens[0] == config.WAKE_WORD:
+    if tokens[0] == config.WAKE_WORD or tokens[0] in config.WAKE_NATIVE_NAMES:
         return True, " ".join(tokens[1:]).strip()
     return False, normalized_text
 
@@ -245,21 +254,43 @@ def is_stop_speech(normalized_text):
 # CLEAN TEXT FOR VOICE
 # ------------------------------------------------------------
 
+def speech_language(text):
+    """Select a Hindi pack when an utterance contains Devanagari letters.
+
+    Latin-only English uses the English pack. Mixed Hindi/English sentences
+    use Hindi; romanized Hindi is intentionally not guessed from spelling.
+    """
+    return "hi" if any(
+        "\u0900" <= char <= "\u097f" and unicodedata.category(char)[0] in {"L", "M"}
+        for char in text
+    ) else "en"
+
+
 def clean_for_voice(text):
     """
     Make LLM output speakable by Piper:
-    strip markdown symbols, emojis and non-ASCII chars,
+    strip markdown symbols and emojis while preserving Unicode letters,
     turn % and ° into words.
     """
 
     text = re.sub(r"```.*?```", " code block ", text, flags=re.DOTALL)
     text = re.sub(r"[*_`#>\[\]|]", " ", text)
-    text = text.replace("%", " percent")
-    text = text.replace("°C", " degrees").replace("°F", " degrees").replace("°", " degrees")
-    text = text.replace("&", " and ")
+    hindi = speech_language(text) == "hi"
+    text = text.replace("%", " प्रतिशत" if hindi else " percent")
+    degrees = " डिग्री" if hindi else " degrees"
+    text = text.replace("°C", degrees).replace("°F", degrees).replace("°", degrees)
+    text = text.replace("&", " और " if hindi else " and ")
+    text = text.replace("—", " ").replace("–", " ")
 
-    # keep ASCII only (this also removes emojis)
-    cleaned = "".join(char for char in text if ord(char) < 128)
+    # Hindi (and other scripts) must retain their vowels/combining marks.
+    # Emoji symbols and their variation selectors are not speech content.
+    cleaned = "".join(
+        char for char in unicodedata.normalize("NFC", text)
+        if char not in "\ufe0e\ufe0f" and (
+            char.isascii() or unicodedata.category(char)[0] in {"L", "M", "N"}
+            or char in "।॥…“”‘’"
+        )
+    )
 
     # collapse whitespace / newlines
     cleaned = re.sub(r"\s+", " ", cleaned)
@@ -271,7 +302,7 @@ def clean_for_voice(text):
 # STREAMING SENTENCE SPLITTER
 # ------------------------------------------------------------
 
-_BOUNDARY = re.compile(r"[.!?][\"')\]]?\s")
+_BOUNDARY = re.compile(r"(?:[.!?][\"')\]]?\s|[।॥][\"')\]]?\s*)")
 _RUNAWAY_CHARS = 400        # force a split if no punctuation for this long
 
 

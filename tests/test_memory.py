@@ -144,3 +144,72 @@ def test_context_block_only_sends_the_most_recent_items(memory):
 
     assert f"- item {MAX_MEMORY_ITEMS + 4}" in block
     assert "- item 0" not in block
+
+
+# ------------------------------------------------------------
+# AUTOMATIC, EXPLICIT LIKES / DISLIKES
+# ------------------------------------------------------------
+
+def test_preferences_survive_a_restart_and_are_available_to_the_brain(memory):
+    saved = memory.remember_preferences([("likes", "Arijit Singh"), ("dislikes", "rap")])
+    assert saved == ["Preference: likes Arijit Singh.", "Preference: dislikes rap."]
+    reloaded = Memory()
+    assert reloaded.items == saved
+    assert "Arijit Singh" in reloaded.context_block()
+    assert "dislikes rap" in reloaded.context_block()
+
+
+def test_duplicate_taste_is_not_saved_repeatedly(memory):
+    memory.remember_preferences([("likes", "jazz")])
+    assert memory.remember_preferences([("likes", "JAZZ")]) == []
+    assert memory.items == ["Preference: likes jazz."]
+    assert memory.preference_updates == []
+
+
+def test_a_changed_taste_replaces_the_opposite_for_that_topic(memory):
+    memory.add("my exam is on Friday")
+    memory.remember_preferences([("likes", "Rap")])
+    memory.remember_preferences([("dislikes", "rap")])
+    assert memory.items == ["my exam is on Friday", "Preference: dislikes rap."]
+    assert Memory().items == memory.items
+
+
+def test_the_last_preference_for_a_topic_on_one_turn_wins(memory):
+    assert memory.remember_preferences([("likes", "rap"), ("dislikes", "rap")]) == ["Preference: dislikes rap."]
+    assert memory.items == ["Preference: dislikes rap."]
+
+
+def test_preferences_can_be_forgotten_using_existing_commands(memory):
+    memory.remember_preferences([("likes", "Arijit Singh"), ("dislikes", "rap")])
+    assert memory.remove("rap") == 1
+    assert Memory().items == ["Preference: likes Arijit Singh."]
+    memory.clear()
+    assert Memory().items == []
+
+
+def test_preferences_keep_hindi_text_in_the_saved_json(memory, isolated_memory_file):
+    memory.remember_preferences([("likes", "अरिजीत के गाने"), ("dislikes", "रैप")])
+    raw = isolated_memory_file.read_text(encoding="utf-8")
+    assert "अरिजीत" in raw and "रैप" in raw
+    assert Memory().items == memory.items
+
+
+def test_failed_preference_save_is_not_claimed_as_a_new_memory(memory, isolated_memory_file, monkeypatch):
+    from lyra import memory as memory_module
+    memory.add("my exam is on Friday")
+    original = isolated_memory_file.read_bytes()
+
+    def fail(*args):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(memory_module.os, "replace", fail)
+    assert memory.remember_preferences([("likes", "jazz")]) == []
+    assert memory.items == ["my exam is on Friday"]
+    assert memory.preference_updates == []
+    assert isolated_memory_file.read_bytes() == original
+    assert list(isolated_memory_file.parent.glob("*.tmp")) == []
+
+
+def test_invalid_or_overlong_preferences_are_rejected(memory):
+    assert memory.remember_preferences([("maybe", "jazz"), ("likes", ""), ("likes", "x" * 200)]) == []
+    assert memory.items == []

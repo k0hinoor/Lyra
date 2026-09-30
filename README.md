@@ -9,7 +9,7 @@ LYRA is a local-first Windows voice assistant built from Python, Faster-Whisper,
 ```text
 Launcher → optional GitHub Releases updater → Ollama/model checks → LYRA core
                                                           │
-Microphone → short Vosk wake gate → Whisper Base command STT → session/router
+Microphone → short Vosk wake gate → multilingual Whisper STT → session/router
                                                           │
                                             built-in skills / safe action planner
                                                           │
@@ -18,13 +18,13 @@ Microphone → short Vosk wake gate → Whisper Base command STT → session/rou
 User data (%APPDATA%/Lyra on Windows): settings, memory, logs, models
 ```
 
-- `lyra/ear.py` loads one Faster-Whisper model per process. The default is CPU `int8`, `base.en`. Transcription passes LYRA's vocabulary as hotwords (Lyra, Brave, Chrome, YouTube, Notepad, terminate execution) so base.en stops mishearing them ("brave" → "breathe", "terminate" → "terminal").
+- `lyra/ear.py` loads one multilingual Faster-Whisper model per process. The default is CPU `int8`, `base`, with automatic language detection per utterance; `small` is recommended for more accurate Hindi at a CPU/latency cost. Transcription keeps Hindi as Hindi (not English translation) and passes English/Hindi LYRA vocabulary as hotwords. Legacy `.en` model settings are mapped to their multilingual equivalent unless English is explicitly forced.
 - `lyra/wake.py` loads the optional Vosk model once. While asleep it processes short audio clips and runs full Whisper only after a wake hit. If the Vosk model is absent, LYRA safely falls back to the previous Whisper wake gate.
-- `lyra/voice.py` loads Piper once. The voice pack download is atomic (temp file + size check + rename), so an interrupted download can never leave a corrupt model. Speaking speed follows `VOICE_SPEED` via Piper's `length_scale`. Piper's 16-bit PCM bytes are validated and converted to NumPy `int16` arrays before sounddevice playback. One lock serializes beeps and speech; streams are stopped and closed after each response. Every spoken sentence is remembered for a short window so the microphone can recognise LYRA's own voice coming back through the speakers.
+- `lyra/voice.py` caches an English and a Hindi Piper pack, loading the Hindi pack only when first needed. Devanagari and mixed-script sentences use `HINDI_VOICE_MODEL`; Latin-only English uses `VOICE_MODEL`. Unicode vowels and combining marks are preserved, and Hindi danda punctuation can stream sentences early. If the two packs have different sample rates, playback closes/reopens the stream at the correct rate instead of distorting pitch or dropping the sentence. The voice pack download is atomic (temp file + size check + rename), so an interrupted download can never leave a corrupt model. Speaking speed follows `VOICE_SPEED` via Piper's `length_scale`. Piper's 16-bit PCM bytes are validated and converted to NumPy `int16` arrays before sounddevice playback. One lock serializes beeps and speech; streams are stopped and closed after each response. Every spoken sentence is remembered for a short window so the microphone can recognise LYRA's own voice coming back through the speakers.
 - Barge-in: while she speaks, a watcher thread (`lyra-barge-in`) keeps the microphone open. Sustained voice — louder than the calibrated room noise times `INTERRUPT_ENERGY_MULTIPLIER` — stops playback immediately; the rest of that phrase is captured, transcribed with the same local Whisper model and handled as the next command. Transcripts that are mostly words she just said are dropped as speaker echo, and "stop"/"be quiet" is always kept.
 - `lyra/browsers.py` finds a named browser (brave, chrome, edge, firefox) through the Windows App Paths registry key and standard install folders, and starts it with a URL as an argument list — never through a shell.
 - `lyra/transcript.py` appends every exchange (what LYRA heard, her full reply, and what handled it) to a dated transcript file under `logs/`.
-- `lyra/brain.py` keeps Ollama warm (`keep_alive`) and streams ordinary responses. The structured planner is invoked only for detected multi-step computer requests to avoid adding an LLM round trip to regular chat or known single commands.
+- `lyra/brain.py` keeps Ollama warm (`keep_alive`) and streams ordinary responses with a concise, warm assistant persona. Taste/opinion questions are conversation, not computer commands. `lyra/preferences.py` extracts only explicit first-person likes/dislikes for local long-term memory; the model does not guess what to save. The structured planner is invoked only for detected multi-step computer requests to avoid adding an LLM round trip to regular chat or known single commands.
 - `lyra/actions/` validates bounded JSON plans and dispatches only registered Python actions. No model-generated PowerShell, CMD, Python, or shell command is evaluated.
 - `lyra/computer/` is the desktop automation adapter; `lyra/screen/` provides `capture_screen()` and window-title capture for future visual reasoning.
 - `lyra/updater.py` updates application files from GitHub Releases with SHA-256 verification and rollback. Memory, configuration, logs, and downloaded models live outside the application directory.
@@ -57,9 +57,10 @@ Use the **LYRA** Desktop/Start Menu shortcut, or double-click `run_lyra.bat` in 
 .venv\Scripts\python.exe -m lyra.launcher --always
 .venv\Scripts\python.exe main.py --devices
 .venv\Scripts\python.exe main.py --voice-test
+.venv\Scripts\python.exe main.py --voice-test --voice-language hi
 ```
 
-`--text` and `--always` are passed through to the core. `--no-update-check` skips the optional release check; `--skip-llm-check` is intended for offline/development diagnostics only. `--voice-test` speaks one sample sentence with the currently configured voice (`VOICE_MODEL`) and speed (`VOICE_SPEED`) and exits — use it after changing either setting.
+`--text` and `--always` are passed through to the core. `--no-update-check` skips the optional release check; `--skip-llm-check` is intended for offline/development diagnostics only. `--voice-test` speaks an English sample using `VOICE_MODEL`; add `--voice-language hi` to test only the selected Hindi pack (`HINDI_VOICE_MODEL`). These tests call the core directly and do not require Whisper or Ollama. An empty/failed synthesis is reported as a failed test, not silent success.
 
 ## Ollama and model setup
 
@@ -70,6 +71,75 @@ ollama pull phi4-mini:3.8b
 ```
 
 To change the model, update `OLLAMA_MODEL` in the user's settings file (see below). LYRA and Ollama/model files update independently; LYRA updates do not replace or delete Ollama models.
+
+## English and Hindi speech
+
+**Update the application files first.** Settings alone cannot fix an older version that deletes non-ASCII speech text or downloads every voice from the English folder.
+
+From the application folder (the **outer** `Lyra` folder containing `main.py` and `run_lyra.bat`), close LYRA and run in PowerShell:
+
+```powershell
+Set-Location "$env:USERPROFILE\Lyra"
+.\.venv\Scripts\python.exe -m lyra.setup_voice --language hi --model hi_IN-priyamvada-medium --set-default --whisper-model small
+.\.venv\Scripts\python.exe main.py --voice-test --voice-language hi
+.\run_lyra.bat
+```
+
+If you use the installed Desktop shortcut instead of a source checkout, run these commands in `$env:LOCALAPPDATA\Programs\LYRA` instead. The setup command downloads only the chosen Hindi pack and atomically merges `HINDI_VOICE_MODEL`, `WHISPER_MODEL`, and `WHISPER_LANGUAGE: "auto"` into your existing settings; other settings are preserved. The selected Whisper model downloads on the next voice launch. No microphone audio or reply text is uploaded.
+
+### Hindi voice choices
+
+The curated packs come from the [official Piper Hindi directory](https://huggingface.co/rhasspy/piper-voices/tree/main/hi/hi_IN):
+
+| Piper model ID | Voice |
+| --- | --- |
+| `hi_IN-priyamvada-medium` | Priyamvada (default Hindi voice) |
+| `hi_IN-pratham-medium` | Pratham |
+| `hi_IN-rohan-medium` | Rohan |
+
+Each pack is roughly 60–65 MB. List choices without a download, or explicitly download all three for later comparison:
+
+```powershell
+.\.venv\Scripts\python.exe -m lyra.setup_voice --list
+.\.venv\Scripts\python.exe -m lyra.setup_voice --all-hindi
+```
+
+To select another voice, replace the model ID in the setup command, for example:
+
+```powershell
+.\.venv\Scripts\python.exe -m lyra.setup_voice --language hi --model hi_IN-rohan-medium --set-default
+.\.venv\Scripts\python.exe main.py --voice-test --voice-language hi
+```
+
+English still uses your existing `VOICE_MODEL`. LYRA selects a pack per sentence: Hindi/English mixed-script speech uses Hindi. Romanized Hindi alone is not reliably detectable from spelling; the chat prompt asks for Hindi replies in Devanagari so they use the Hindi voice. This is local Piper speech, not a clone of a movie character's voice.
+
+### Hindi recognition and wake words
+
+- Use multilingual `base`, `small`, etc., **not** `base.en` or `small.en`. With `WHISPER_LANGUAGE: "auto"`, English, Hindi and mixed speech can reach the conversational model in their original language. Whisper is not a perfect recognizer, especially for short utterances, accents, background noise or frequent code-switching.
+- `small` usually improves Hindi recognition but is larger and slower on a CPU. Choose `base` in the setup command for lower latency. `WHISPER_BEAM` accepts `1`–`5` (default `3`); `1` is quicker.
+- If automatic detection keeps guessing the wrong language during an all-Hindi session, set `WHISPER_LANGUAGE` to `"hi"` in settings and restart. Use `"en"` for an intentionally English-only session.
+- Say **“Hey Lyra”** first, then speak Hindi during the follow-up window. With Whisper wake fallback, common Hindi transcriptions such as `हे लायरा` and `हे लाइरा` also work. The optional **English Vosk** wake pack still expects the English wake phrase; it does not become a Hindi acoustic model.
+- Hindi conversation, taste memory, and explicit Hindi memory commands work. Most desktop skills still expect their documented **English** commands; arbitrary Hindi desktop requests are not automatically translated into executable actions.
+
+### Natural conversation and remembered tastes
+
+“Do you like music?” now stays in conversation instead of being reduced to “music” and answered with a volume level. LYRA's chat prompt has a consistent conversational taste (soulful Hindi melodies, mellow jazz, cinematic instrumentals), avoids repetitive customer-service offers, and allows a brief relevant follow-up. Its persona is not a claim of human feelings or real listening experiences. Actual phrasing and Hindi fluency still depend on the configured local Ollama model.
+
+Clear first-person likes/dislikes are saved locally **before** the current chat reply, and are available after restarting LYRA. For example:
+
+- “I like Arijit Singh but I don't like rap.”
+- “मुझे अरिजीत के गाने पसंद हैं लेकिन मुझे रैप पसंद नहीं है।”
+- Later: “What music do I like?” or “मुझे किस तरह का संगीत पसंद है?”
+
+Repeating the same taste does not duplicate it; changing from liking to disliking the same topic replaces that automatically captured preference. This also supports other explicitly stated tastes, not just music. Questions, uncertain statements, quotations and statements about other people are not inferred into a user profile. Complex descriptions can be stored explicitly with “remember that …” or “याद रखना कि …”.
+
+Use “what do you remember” / “तुम्हें क्या याद है”, “forget about rap” / “रैप के बारे में भूल जाओ”, or the existing confirmed “forget everything” command to inspect/remove memories. Set `AUTO_REMEMBER_PREFERENCES` to `false` to disable automatic capture; explicit remember/forget commands still work. The existing list-shaped `memory.json` stays compatible, writes are atomic, and the model is told about a new save only after the write succeeds.
+
+### If Hindi still has no sound
+
+1. Run `main.py --voice-test --voice-language hi` using the private venv as above; it isolates speech from recognition and the chat model.
+2. Check that the Hindi pack download completed and `HINDI_VOICE_MODEL` is a `hi_IN-...` ID. Setup refuses a malformed settings file rather than overwriting it. Environment overrides such as `LYRA_HINDI_VOICE_MODEL` take precedence over JSON settings.
+3. If the model loads but there is still no sound, check the default output device or run `main.py --devices` and set `OUTPUT_DEVICE`. Inspect `%APPDATA%\Lyra\logs\lyra.log` for synthesis/playback errors. A missing Hindi pack is logged visibly and does not disable later English replies.
 
 ## Wake-word setup
 
@@ -93,13 +163,17 @@ Create `%APPDATA%\Lyra\settings.json` from `config/settings.example.json`. Suppo
 {
   "OLLAMA_MODEL": "phi4-mini:3.8b",
   "VOICE_MODEL": "en_US-lessac-medium",
+  "HINDI_VOICE_MODEL": "hi_IN-priyamvada-medium",
   "VOICE_SPEED": 1.15,
   "INTERRUPT_ENERGY_MULTIPLIER": 2.0,
   "BROWSER": "",
   "OUTPUT_DEVICE": null,
   "WAKE_FUZZY_MAX_DISTANCE": 2,
   "WAKE_WINDOW_SECONDS": 4.0,
-  "WHISPER_MODEL": "base.en",
+  "WHISPER_MODEL": "base",
+  "WHISPER_LANGUAGE": "auto",
+  "WHISPER_BEAM": 3,
+  "AUTO_REMEMBER_PREFERENCES": true,
   "OLLAMA_URL": "http://localhost:11434/api/chat",
   "LOG_LEVEL": "INFO",
   "CONSOLE_LOG_LEVEL": "WARNING"
@@ -109,13 +183,16 @@ Create `%APPDATA%\Lyra\settings.json` from `config/settings.example.json`. Suppo
 Setting notes:
 
 - `VOICE_MODEL` — any English Piper voice name (`en_US-lessac-medium` is the default; `en_US-amy-medium`, `en_US-lessac-high`, `en_GB-jenny-high`, ...). Packs download atomically on first use (temp file + size check + rename), so an interrupted download cannot leave a corrupt model. Test a change with `python main.py --voice-test`.
+- `HINDI_VOICE_MODEL` — Hindi Piper pack, default `hi_IN-priyamvada-medium`; alternatives and setup commands are above. Test with `main.py --voice-test --voice-language hi`.
+- `WHISPER_MODEL`, `WHISPER_LANGUAGE`, `WHISPER_BEAM` — multilingual recognition model, `auto` / `en` / `hi`, and decoding beam width (`1`–`5`).
+- `AUTO_REMEMBER_PREFERENCES` — `true` by default; capture only explicit first-person likes/dislikes. Set `false` for explicit-memory-only mode.
 - `VOICE_SPEED` — speaking-speed multiplier, clamped to `0.8`–`1.5`; default `1.15` (a little faster than the Piper default). Internally passed to Piper as `length_scale = 1 / VOICE_SPEED`.
 - `INTERRUPT_ENERGY_MULTIPLIER` — how much louder than the calibrated room noise your voice must be to cut LYRA off, clamped to `1.0`–`10.0`; default `2.0`. Raise it in a room where the microphone over-hears her (or where she interrupts herself through the speakers); lower it if a quiet "stop" no longer interrupts. Only a sustained sound counts — a cough or a keyboard tap is ignored.
 - `BROWSER` — `"brave"`, `"chrome"`, `"edge"`, `"firefox"` or `""` (empty = the Windows default browser). Used by all web commands when no browser is named in the request; see Commands below.
 - `LOG_LEVEL` — detail written to `logs/lyra.log` (default `INFO`, full diagnostics for bug reports).
 - `CONSOLE_LOG_LEVEL` — what the console shows (default `WARNING`, so INFO chatter such as Whisper's audio-duration lines stays out of the conversation view).
 
-Environment variables such as `LYRA_OLLAMA_MODEL`, `LYRA_VOICE_MODEL`, `LYRA_VOICE_SPEED`, `LYRA_INTERRUPT_ENERGY_MULTIPLIER`, `LYRA_BROWSER`, `LYRA_CONSOLE_LOG_LEVEL`, and `LYRA_OUTPUT_DEVICE` override JSON settings. Never put API credentials in source or commit personal settings. Local state includes:
+Environment variables such as `LYRA_OLLAMA_MODEL`, `LYRA_VOICE_MODEL`, `LYRA_HINDI_VOICE_MODEL`, `LYRA_WHISPER_MODEL`, `LYRA_WHISPER_LANGUAGE`, `LYRA_WHISPER_BEAM`, `LYRA_AUTO_REMEMBER_PREFERENCES`, `LYRA_VOICE_SPEED`, `LYRA_INTERRUPT_ENERGY_MULTIPLIER`, `LYRA_BROWSER`, `LYRA_CONSOLE_LOG_LEVEL`, and `LYRA_OUTPUT_DEVICE` override JSON settings. Never put API credentials in source or commit personal settings. Local state includes:
 
 - `memory.json` — persistent user memory
 - `settings.json` — non-secret user preferences
