@@ -19,7 +19,7 @@ User data (%APPDATA%/Lyra on Windows): settings, memory, logs, models
 ```
 
 - `lyra/ear.py` loads one multilingual Faster-Whisper model per process. The default is CPU `int8`, `base`, with automatic language detection per utterance; `small` is recommended for more accurate Hindi at a CPU/latency cost. Transcription keeps Hindi as Hindi (not English translation) and passes English/Hindi LYRA vocabulary as hotwords. Legacy `.en` model settings are mapped to their multilingual equivalent unless English is explicitly forced.
-- `lyra/wake.py` loads the optional Vosk model once. While asleep it processes short audio clips and runs full Whisper only after a wake hit. If the Vosk model is absent, LYRA safely falls back to the previous Whisper wake gate.
+- `lyra/wake.py` loads the optional Vosk model once. While asleep it processes short audio clips and runs full Whisper only after a wake hit. If the Vosk model is absent, LYRA falls back to a Whisper wake gate: `Ear.transcribe_wake()` decodes the short clip with a pinned language (English unless another language is configured) instead of per-clip language detection, which too often guesses wrong on one or two seconds of audio and hands the matcher text no wake spelling can match. When that English pass contains no wake phrase and `WHISPER_LANGUAGE` is `auto`, one auto-detect retry runs so Hindi native-script names such as `हे लायरा` still work. Every wake clip can be printed with `WAKE_DEBUG`/`--debug-wake`, and a missing Vosk model prints one install hint at startup.
 - `lyra/voice.py` caches an English and a Hindi Piper pack, loading the Hindi pack only when first needed. Devanagari and mixed-script sentences use `HINDI_VOICE_MODEL`; Latin-only English uses `VOICE_MODEL`. Unicode vowels and combining marks are preserved, and Hindi danda punctuation can stream sentences early. If the two packs have different sample rates, playback closes/reopens the stream at the correct rate instead of distorting pitch or dropping the sentence. The voice pack download is atomic (temp file + size check + rename), so an interrupted download can never leave a corrupt model. Speaking speed follows `VOICE_SPEED` via Piper's `length_scale`. Piper's 16-bit PCM bytes are validated and converted to NumPy `int16` arrays before sounddevice playback. One lock serializes beeps and speech; streams are stopped and closed after each response. Every spoken sentence is remembered for a short window so the microphone can recognise LYRA's own voice coming back through the speakers.
 - Barge-in: while she speaks, a watcher thread (`lyra-barge-in`) keeps the microphone open. Sustained voice — louder than the calibrated room noise times `INTERRUPT_ENERGY_MULTIPLIER` — stops playback immediately; the rest of that phrase is captured, transcribed with the same local Whisper model and handled as the next command. Transcripts that are mostly words she just said are dropped as speaker echo, and "stop"/"be quiet" is always kept.
 - `lyra/browsers.py` finds a named browser (brave, chrome, edge, firefox) through the Windows App Paths registry key and standard install folders, and starts it with a URL as an argument list — never through a shell.
@@ -56,11 +56,13 @@ Use the **LYRA** Desktop/Start Menu shortcut, or double-click `run_lyra.bat` in 
 .venv\Scripts\python.exe -m lyra.launcher --text
 .venv\Scripts\python.exe -m lyra.launcher --always
 .venv\Scripts\python.exe main.py --devices
+.venv\Scripts\python.exe main.py --mic-test
+.venv\Scripts\python.exe main.py --debug-wake
 .venv\Scripts\python.exe main.py --voice-test
 .venv\Scripts\python.exe main.py --voice-test --voice-language hi
 ```
 
-`--text` and `--always` are passed through to the core. `--no-update-check` skips the optional release check; `--skip-llm-check` is intended for offline/development diagnostics only. `--voice-test` speaks an English sample using `VOICE_MODEL`; add `--voice-language hi` to test only the selected Hindi pack (`HINDI_VOICE_MODEL`). These tests call the core directly and do not require Whisper or Ollama. An empty/failed synthesis is reported as a failed test, not silent success.
+`--text`, `--always`, `--devices`, `--mic-test` and `--debug-wake` are passed through to the core (`--mic-test` skips the Ollama check it does not need). `--no-update-check` skips the optional release check; `--skip-llm-check` is intended for offline/development diagnostics only. `--voice-test` speaks an English sample using `VOICE_MODEL`; add `--voice-language hi` to test only the selected Hindi pack (`HINDI_VOICE_MODEL`). These tests call the core directly and do not require Whisper or Ollama. `--mic-test` measures the live microphone level for five seconds, records one clip and runs it through the real wake gate, printing what the gate heard and whether "Hey Lyra" matched — the fastest way to tell a microphone problem from a wake-matching problem. `--debug-wake` prints one `[wake-debug] engine=… lang=… heard='…' -> WAKE/no wake` line for every captured wake clip (the same switch as `"WAKE_DEBUG": true` in settings). An empty/failed synthesis is reported as a failed test, not silent success.
 
 ## Ollama and model setup
 
@@ -118,7 +120,7 @@ English still uses your existing `VOICE_MODEL`. LYRA selects a pack per sentence
 - Use multilingual `base`, `small`, etc., **not** `base.en` or `small.en`. With `WHISPER_LANGUAGE: "auto"`, English, Hindi and mixed speech can reach the conversational model in their original language. Whisper is not a perfect recognizer, especially for short utterances, accents, background noise or frequent code-switching.
 - `small` usually improves Hindi recognition but is larger and slower on a CPU. Choose `base` in the setup command for lower latency. `WHISPER_BEAM` accepts `1`–`5` (default `3`); `1` is quicker.
 - If automatic detection keeps guessing the wrong language during an all-Hindi session, set `WHISPER_LANGUAGE` to `"hi"` in settings and restart. Use `"en"` for an intentionally English-only session.
-- Say **“Hey Lyra”** first, then speak Hindi during the follow-up window. With Whisper wake fallback, common Hindi transcriptions such as `हे लायरा` and `हे लाइरा` also work. The optional **English Vosk** wake pack still expects the English wake phrase; it does not become a Hindi acoustic model.
+- Say **“Hey Lyra”** first, then speak Hindi during the follow-up window. With Whisper wake fallback, common Hindi transcriptions such as `हे लायरा` and `हे लाइरा` also work (the wake clip is decoded in English first and retried with language detection when that misses). The optional **English Vosk** wake pack still expects the English wake phrase; it does not become a Hindi acoustic model.
 - Hindi conversation, taste memory, and explicit Hindi memory commands work. Most desktop skills still expect their documented **English** commands; arbitrary Hindi desktop requests are not automatically translated into executable actions.
 
 ### Natural conversation and remembered tastes
@@ -145,13 +147,24 @@ Use “what do you remember” / “तुम्हें क्या याद
 
 The intended phrase is **“Hey Lyra.”** The wake matcher requires a wake prefix at the start of the phrase and tolerates a small edit distance only on the following name. This allows the tested forms `Lyra`, `Laira`, `Lira`, `Laura`, `later`, `Leyra`, `Leira`, `Lyrah`, plus the explicitly requested `Bobby` transcription; phrases such as “see you later”, “okay”, and “hip hop” do not satisfy the prefix/name shape.
 
+The matcher also accepts the mishearings seen most often after "Hey": `Lara`, `Leera`, `Lyre`, `Lyrics`, `Hilera`, glued greetings (`heylyra`, `hailyra`), a leading `a` (`a lyra`) and the multi-word forms (`hi lyra`, `hello lyra`, `ok lyra`, `hey laura`). Only the plain `Lyra` and its Devanagari spellings may wake LYRA with no greeting at all, so "see you later", "the lyrics are wrong" and "hey there" stay background speech.
+
 For lightweight wake recognition, install the optional Vosk English model once (about 40 MB):
 
 ```bat
 .venv\Scripts\python.exe -m lyra.setup_wake_model
 ```
 
-This download is explicit and goes into the user data directory. Restart LYRA afterward. With no model installed, the existing Whisper wake behavior remains available. Full Whisper command recognition is unchanged and runs after the lightweight gate accepts a wake phrase.
+This download is explicit and goes into the user data directory. Restart LYRA afterward. With no model installed, LYRA prints one line at startup saying so and uses the Whisper wake gate instead: the short clip is decoded in English first (instead of per-clip language detection, which is unreliable on one or two seconds of audio) with the same hotword bias as commands, and one auto-detect retry runs only if that misses. Full Whisper command recognition is unchanged and runs after the gate accepts a wake phrase.
+
+When the wake gate still ignores you, look at what it actually hears:
+
+```bat
+.venv\Scripts\python.exe main.py --mic-test
+.venv\Scripts\python.exe main.py --debug-wake
+```
+
+`--mic-test` prints `[wake-debug] engine=<vosk|whisper> lang=<detected> heard='<text>' -> WAKE/no wake` for the clip it records and exits non-zero when the phrase did not match. A rejected clip prints nothing during normal running by design — background chatter must stay silent — so use `--debug-wake` (or `"WAKE_DEBUG": true`) whenever "she ignores me" has to be diagnosed.
 
 ## Configuration and user data
 
@@ -168,6 +181,9 @@ Create `%APPDATA%\Lyra\settings.json` from `config/settings.example.json`. Suppo
   "INTERRUPT_ENERGY_MULTIPLIER": 2.0,
   "BROWSER": "",
   "OUTPUT_DEVICE": null,
+  "INPUT_DEVICE": null,
+  "ENERGY_THRESHOLD_MAX": 1000,
+  "WAKE_DEBUG": false,
   "WAKE_FUZZY_MAX_DISTANCE": 2,
   "WAKE_WINDOW_SECONDS": 4.0,
   "WHISPER_MODEL": "base",
@@ -189,10 +205,13 @@ Setting notes:
 - `VOICE_SPEED` — speaking-speed multiplier, clamped to `0.8`–`1.5`; default `1.15` (a little faster than the Piper default). Internally passed to Piper as `length_scale = 1 / VOICE_SPEED`.
 - `INTERRUPT_ENERGY_MULTIPLIER` — how much louder than the calibrated room noise your voice must be to cut LYRA off, clamped to `1.0`–`10.0`; default `2.0`. Raise it in a room where the microphone over-hears her (or where she interrupts herself through the speakers); lower it if a quiet "stop" no longer interrupts. Only a sustained sound counts — a cough or a keyboard tap is ignored.
 - `BROWSER` — `"brave"`, `"chrome"`, `"edge"`, `"firefox"` or `""` (empty = the Windows default browser). Used by all web commands when no browser is named in the request; see Commands below.
+- `INPUT_DEVICE` — microphone index for `speech_recognition`, or `null` for the Windows default input device. Run `python main.py --devices` to see the indices (input and output, with the Windows defaults marked) and set the one you want; the startup banner prints the device name it opened. Wrong indices are ignored with a warning instead of stopping LYRA.
+- `ENERGY_THRESHOLD_MAX` — ceiling for the noise floor calibrated at startup, in RMS units (default `1000`). `adjust_for_ambient_noise` measures the room, and a noisy room can settle on a threshold louder than your voice; every later `listen()` then ignores you, which looks exactly like a dead microphone. Raise it only in a genuinely loud room.
+- `WAKE_DEBUG` — `true` prints one `[wake-debug] engine=… lang=… heard='…' -> WAKE/no wake` line for every wake-gate clip (same as `main.py --debug-wake`). Use it to see mishearings instead of silent rejections.
 - `LOG_LEVEL` — detail written to `logs/lyra.log` (default `INFO`, full diagnostics for bug reports).
 - `CONSOLE_LOG_LEVEL` — what the console shows (default `WARNING`, so INFO chatter such as Whisper's audio-duration lines stays out of the conversation view).
 
-Environment variables such as `LYRA_OLLAMA_MODEL`, `LYRA_VOICE_MODEL`, `LYRA_HINDI_VOICE_MODEL`, `LYRA_WHISPER_MODEL`, `LYRA_WHISPER_LANGUAGE`, `LYRA_WHISPER_BEAM`, `LYRA_AUTO_REMEMBER_PREFERENCES`, `LYRA_VOICE_SPEED`, `LYRA_INTERRUPT_ENERGY_MULTIPLIER`, `LYRA_BROWSER`, `LYRA_CONSOLE_LOG_LEVEL`, and `LYRA_OUTPUT_DEVICE` override JSON settings. Never put API credentials in source or commit personal settings. Local state includes:
+Environment variables such as `LYRA_OLLAMA_MODEL`, `LYRA_VOICE_MODEL`, `LYRA_HINDI_VOICE_MODEL`, `LYRA_WHISPER_MODEL`, `LYRA_WHISPER_LANGUAGE`, `LYRA_WHISPER_BEAM`, `LYRA_AUTO_REMEMBER_PREFERENCES`, `LYRA_VOICE_SPEED`, `LYRA_INTERRUPT_ENERGY_MULTIPLIER`, `LYRA_BROWSER`, `LYRA_CONSOLE_LOG_LEVEL`, `LYRA_OUTPUT_DEVICE`, `LYRA_INPUT_DEVICE`, `LYRA_ENERGY_THRESHOLD_MAX`, and `LYRA_WAKE_DEBUG` override JSON settings. Never put API credentials in source or commit personal settings. Local state includes:
 
 - `memory.json` — persistent user memory
 - `settings.json` — non-secret user preferences
@@ -284,7 +303,10 @@ The tests run without physical audio devices or Ollama. Hardware-dependent funct
 
 - **Ollama missing/not running:** install/start Ollama, then relaunch. The launcher offers a retry.
 - **Model missing:** consent to the launcher prompt or run `ollama pull phi4-mini:3.8b`.
-- **No lightweight wake detector:** run `python -m lyra.setup_wake_model`; without that optional model LYRA falls back to Whisper wake detection.
+- **Wake word ignored / "she prints nothing when I speak":** run `.venv\Scripts\python.exe main.py --mic-test`. It shows the live level (flat at zero = the microphone, Windows privacy settings or `INPUT_DEVICE`), the calibrated energy threshold (capped at `ENERGY_THRESHOLD_MAX`), one `[wake-debug]` line for the recorded clip, and whether `strip_wake_word` matched. Then run LYRA with `--debug-wake` (or set `"WAKE_DEBUG": true`) to see every clip while it runs. The gate drops non-wake clips silently on purpose, so a misheard "Hey Lyra" is invisible without it.
+- **No lightweight wake detector:** run `.venv\Scripts\python.exe -m lyra.setup_wake_model`; without that optional model LYRA prints one startup line and falls back to Whisper wake detection (English-first on the wake clip, one auto-detect retry). Install it if wake misses are frequent — Vosk is the faster, more reliable gate.
+- **Wake word only works sometimes:** the wake clip is 1–2 seconds long and Whisper may hear "Hey Lyra" as something else (`lara`, `leera`, `lyre`, `lyrics`, `hilyra`, ...). Those spellings are already accepted after a greeting; `--debug-wake` shows what the gate really heard, and `WHISPER_MODEL: "small"` recognises short clips better than `base` at a CPU cost.
+- **Mic too quiet or too noisy:** `main.py --mic-test` shows the level and the threshold. If the threshold was capped, the console says so; if the microphone is wrong, pick one with `main.py --devices` and set `INPUT_DEVICE`.
 - **No/wrong speaker:** run `.venv\Scripts\python.exe main.py --devices`, set `OUTPUT_DEVICE` in `settings.json`, then restart.
 - **Piper playback error:** inspect `%APPDATA%\Lyra\logs\lyra.log`. Diagnostics include sample rate, chunk byte count, output device, and stack traces; playback requires signed 16-bit mono PCM.
 - **No microphone access:** Windows Settings → Privacy & security → Microphone → allow desktop apps.
@@ -302,7 +324,7 @@ lyra/launcher.py            desktop entrypoint and Ollama/update checks
 lyra/updater.py             verified GitHub Releases updater
 lyra/version.py             application version
 lyra/config.py              defaults and user-data/config paths
-lyra/wake.py                optional Vosk wake gate
+lyra/wake.py                optional Vosk wake gate + Whisper fallback, wake debug line
 lyra/ear.py                 persistent Faster-Whisper recognizer (hotword-biased)
 lyra/voice.py               persistent Piper model + typed sounddevice playback
 lyra/brain.py               Ollama streaming and structured plan requests
@@ -322,7 +344,7 @@ install.bat / run_lyra.bat   Windows installer and launcher
 
 - Real microphone/speaker playback, Vosk recognition quality, Ollama model output, Windows shortcut installation, and desktop actions cannot be validated in a headless CI environment.
 - Vosk's optional small English model is a general recognizer rather than a dedicated Lyra acoustic wake model. Wake phrase matching reduces false positives but must be evaluated in the user's room/accent; the explicit “Hey Bobby” accommodation necessarily raises a narrow false-trigger tradeoff.
-- If the Vosk model is absent, wake detection falls back to Whisper and has the old idle transcription cost.
+- If the Vosk model is absent, wake detection falls back to Whisper and has the old idle transcription cost. The fallback now pins English for the wake clip and retries once with language detection, but a quiet or heavily accented "Hey Lyra" can still be transcribed as something outside the alias list; `--debug-wake` is the supported way to see and report that.
 - The action planner is used for a constrained set of multi-step requests, not a general autonomous computer agent. Screen capture exists, but no visual observer/OCR currently verifies app state; results are usually `UNKNOWN`.
 - Voice-mode multi-step tasks run in a background worker so the microphone remains available for “stop”/“cancel task”. Cancellation is cooperative between actions; it cannot undo an OS action already in progress or interrupt an Ollama request mid-flight. Text-mode task execution is synchronous; Ctrl+C and `terminate execution` remain available. A non-blocking task/voice-control loop is a future development phase.
 - The source installer still requires a supported Python runtime and internet access once. It does not bundle Python, Ollama, or the model. Start-with-Windows is not enabled.

@@ -7,6 +7,11 @@
 ============================================================
 """
 
+import json
+import os
+import subprocess
+import sys
+
 import pytest
 
 from lyra import config
@@ -185,3 +190,129 @@ def test_whisper_beam_size_can_be_tuned_for_cpu_latency(value, expected):
 def test_invalid_whisper_beam_sizes_are_rejected(value):
     with pytest.raises(ValueError):
         config._parse_setting("WHISPER_BEAM", value)
+
+
+# ------------------------------------------------------------
+# CALIBRATED ENERGY THRESHOLD
+# ------------------------------------------------------------
+
+def test_the_default_energy_cap_stops_a_noisy_calibration_from_muting_the_mic():
+    assert config.ENERGY_THRESHOLD_MAX == 1000
+    assert config.clamp_energy_threshold(5000) == 1000
+
+
+@pytest.mark.parametrize("value, expected", [
+    (205.0, 205.0),          # the threshold a normal room calibrates
+    ("800", 800.0),
+    (1000, 1000.0),
+    (5000, 1000.0),          # noisy room -> capped
+    (0, 1.0),                # zero floor would make room noise "speech"
+    (-3, 1.0),
+])
+def test_calibrated_thresholds_are_clamped(value, expected):
+    assert config.clamp_energy_threshold(value) == expected
+
+
+def test_the_cap_follows_a_configured_ceiling(monkeypatch):
+    monkeypatch.setattr(config, "ENERGY_THRESHOLD_MAX", 400.0)
+    assert config.clamp_energy_threshold(5000) == 400.0
+    assert config.clamp_energy_threshold(250) == 250.0
+
+
+@pytest.mark.parametrize("value", ["loud", None, "", "n/a"])
+def test_a_non_numeric_calibration_is_rejected(value):
+    assert config.clamp_energy_threshold(value) is None
+
+
+def test_the_cap_can_be_raised_from_settings():
+    assert config._parse_setting("ENERGY_THRESHOLD_MAX", "2500") == 2500.0
+    assert config._parse_setting("ENERGY_THRESHOLD_MAX", 250) == 250.0
+
+
+@pytest.mark.parametrize("value", [0, -10, "loud", None])
+def test_an_unusable_energy_cap_is_rejected(value):
+    with pytest.raises(ValueError):
+        config._parse_setting("ENERGY_THRESHOLD_MAX", value)
+
+
+# ------------------------------------------------------------
+# INPUT DEVICE / WAKE DEBUG
+# ------------------------------------------------------------
+
+def test_the_default_input_device_is_the_windows_default():
+    assert config.INPUT_DEVICE is None
+
+
+@pytest.mark.parametrize("value, expected", [
+    (None, None), ("", None), ("  ", None),          # default device
+    (1, 1), ("1", 1), (5, 5), (" 7 ", 7),            # explicit index
+])
+def test_input_device_parses_like_the_output_device(value, expected):
+    assert config._parse_setting("INPUT_DEVICE", value) == expected
+    assert config._parse_setting("OUTPUT_DEVICE", value) == expected
+
+
+@pytest.mark.parametrize("value", ["usb", "Microphone (USB Audio Device)", 1.5])
+def test_an_invalid_input_device_is_rejected(value):
+    with pytest.raises(ValueError):
+        config._parse_setting("INPUT_DEVICE", value)
+
+
+def test_wake_debug_is_off_by_default():
+    assert config.WAKE_DEBUG is False
+
+
+@pytest.mark.parametrize("value, expected", [
+    (True, True), (False, False), ("true", True), ("false", False),
+])
+def test_wake_debug_setting_is_boolean(value, expected):
+    assert config._parse_setting("WAKE_DEBUG", value) is expected
+
+
+def test_invalid_wake_debug_setting_is_rejected():
+    with pytest.raises(ValueError):
+        config._parse_setting("WAKE_DEBUG", "sometimes")
+
+
+def test_new_settings_reach_the_runtime_from_json_and_environment(tmp_path):
+    (tmp_path / "settings.json").write_text(json.dumps({
+        "INPUT_DEVICE": 1, "WAKE_DEBUG": False, "ENERGY_THRESHOLD_MAX": 250,
+    }))
+    environment = {key: value for key, value in os.environ.items() if not key.startswith("LYRA_")}
+    environment.update(
+        LYRA_DATA_DIR=str(tmp_path),
+        LYRA_INPUT_DEVICE="2",
+        LYRA_WAKE_DEBUG="true",
+        LYRA_ENERGY_THRESHOLD_MAX="800",
+    )
+    result = subprocess.run([
+        sys.executable, "-c",
+        "from lyra import config; import json; print(json.dumps(["
+        "config.INPUT_DEVICE, config.WAKE_DEBUG, config.ENERGY_THRESHOLD_MAX]))",
+    ], capture_output=True, text=True, env=environment, check=True)
+
+    assert json.loads(result.stdout) == [2, True, 800.0]
+
+
+def test_new_settings_work_from_json_alone(tmp_path):
+    (tmp_path / "settings.json").write_text(json.dumps({
+        "INPUT_DEVICE": 3, "WAKE_DEBUG": "true", "ENERGY_THRESHOLD_MAX": 250,
+    }))
+    environment = {key: value for key, value in os.environ.items() if not key.startswith("LYRA_")}
+    environment["LYRA_DATA_DIR"] = str(tmp_path)
+    result = subprocess.run([
+        sys.executable, "-c",
+        "from lyra import config; import json; print(json.dumps(["
+        "config.INPUT_DEVICE, config.WAKE_DEBUG, config.ENERGY_THRESHOLD_MAX]))",
+    ], capture_output=True, text=True, env=environment, check=True)
+
+    assert json.loads(result.stdout) == [3, True, 250.0]
+
+
+def test_the_settings_example_documents_the_new_keys():
+    example = json.loads(
+        (config.BASE_DIR / "config" / "settings.example.json").read_text(encoding="utf-8")
+    )
+    assert example["INPUT_DEVICE"] is None
+    assert example["WAKE_DEBUG"] is False
+    assert example["ENERGY_THRESHOLD_MAX"] == 1000

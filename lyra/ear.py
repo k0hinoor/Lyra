@@ -8,6 +8,13 @@
  - transcribes straight from RAM (no WAV file on disk)
  - beam size 1, VAD trimmed, no timestamps
  - 16 kHz mono int8 on CPU
+
+ Two entry points:
+
+ - transcribe_audio()  commands, in the configured language ("auto"
+   detects per utterance)
+ - transcribe_wake()   the short wake-gate clip, always decoded in a
+   pinned language first so per-clip detection cannot guess wrong
 ============================================================
 """
 
@@ -16,8 +23,12 @@ import logging
 import numpy as np
 
 from . import config
+from .utils import normalize, strip_wake_word
 
 log = logging.getLogger(__name__)
+
+# Sentinel: "no language was forced for this call, use the configured one".
+_DEFAULT_LANGUAGE = object()
 
 
 class Ear:
@@ -27,6 +38,10 @@ class Ear:
         from faster_whisper import WhisperModel
 
         self.language = None if config.WHISPER_LANGUAGE == "auto" else config.WHISPER_LANGUAGE
+        # Language reported by the last transcription: what Whisper detected
+        # in auto mode, or the language that was pinned. The wake debug line
+        # (WAKE_DEBUG / --debug-wake) prints it.
+        self.last_language = None
         model_name = config.WHISPER_MODEL
         # Existing Windows settings may still contain base.en. That model
         # can never understand Hindi, even with language="hi" requested.
@@ -60,11 +75,60 @@ class Ear:
     # TRANSCRIBE
     # --------------------------------------------------------
 
-    def transcribe_audio(self, audio_data):
+    @property
+    def wake_language(self):
+        """Language for a wake clip: the configured one, or English when auto.
+
+        Per-clip detection on a 1-2 second utterance often settles on the
+        wrong language, and then "Hey Lyra" comes back as Hindi script or as
+        an unrelated English sentence. The wake phrase is English, so auto
+        mode pins English for the wake clip instead of detecting.
+        """
+        return self.language or "en"
+
+    def transcribe_audio(self, audio_data, language=_DEFAULT_LANGUAGE):
         """
         audio_data: speech_recognition.AudioData
         Returns the transcript string ('' on failure).
+
+        `language` overrides WHISPER_LANGUAGE for this one call
+        (None = let Whisper detect the language).
         """
+        return self._transcribe(
+            audio_data,
+            self.language if language is _DEFAULT_LANGUAGE else language,
+        )
+
+    def transcribe_wake(self, audio_data):
+        """Transcribe one wake-gate clip and return the best wake transcript.
+
+        First pass: the pinned wake language (English unless another language
+        was configured), with the same hotword bias as commands, so a short
+        clip is decoded as the English phrase it really is. When that pass
+        does not contain an accepted wake phrase, one auto-detect retry runs
+        (only in WHISPER_LANGUAGE="auto") so a Hindi native-script wake name
+        spoken as "हे लायरा" still has a chance.
+        """
+
+        transcript = self._transcribe(audio_data, self.wake_language)
+
+        if _contains_wake_phrase(transcript):
+            return transcript
+
+        if self.language is None:
+            retry = self._transcribe(audio_data, None)
+            if retry and _contains_wake_phrase(retry):
+                return retry
+            return transcript or retry
+
+        return transcript
+
+    # --------------------------------------------------------
+    # INTERNALS
+    # --------------------------------------------------------
+
+    def _audio_array(self, audio_data):
+        """int16 AudioData -> float32 mono array in [-1, 1], or None."""
 
         try:
             raw = audio_data.get_raw_data(
@@ -73,19 +137,26 @@ class Ear:
             )
         except Exception:
             log.exception("Could not read microphone audio")
-            return ""
+            return None
 
         try:
             audio_array = np.frombuffer(raw, dtype=np.int16)
             if not audio_array.size:
-                return ""
-            audio_array = audio_array.astype(np.float32) / 32768.0
+                return None
+            return audio_array.astype(np.float32) / 32768.0
         except (TypeError, ValueError):
             log.exception("Invalid microphone PCM buffer")
+            return None
+
+    def _transcribe(self, audio_data, language):
+        """One Whisper call with command-quality settings. '' on failure."""
+
+        audio_array = self._audio_array(audio_data)
+        if audio_array is None:
             return ""
 
         kwargs = dict(
-            language=self.language,
+            language=language,
             task="transcribe",  # keep Hindi as Hindi; do not translate it to English
             temperature=0.0,
             beam_size=config.WHISPER_BEAM,
@@ -99,23 +170,36 @@ class Ear:
         )
 
         # Bias Whisper towards Lyra's own vocabulary so "brave" is not
-        # heard as "breathe" and "terminate" not as "terminal".
+        # heard as "breathe" and "terminate" not as "terminal". The same bias
+        # keeps "Hey Lyra" itself in the wake clip's transcript.
         hotwords = getattr(config, "WHISPER_HOTWORDS", "")
         if hotwords:
             kwargs["hotwords"] = hotwords
 
         try:
             try:
-                segments, _info = self.model.transcribe(audio_array, **kwargs)
+                segments, info = self.model.transcribe(audio_array, **kwargs)
             except TypeError:
-                # older faster-whisper without hotword support
+                # older faster-whisper without hotword support: an initial
+                # prompt carries the same vocabulary into the decoder.
+                if "hotwords" not in kwargs:
+                    raise
                 kwargs.pop("hotwords", None)
-                segments, _info = self.model.transcribe(audio_array, **kwargs)
+                if hotwords:
+                    kwargs["initial_prompt"] = hotwords
+                segments, info = self.model.transcribe(audio_array, **kwargs)
 
             text = " ".join(segment.text for segment in segments)
-            log.debug("Whisper detected language=%s", getattr(_info, "language", "unknown"))
+            self.last_language = getattr(info, "language", None) or language or "unknown"
+            log.debug("Whisper detected language=%s", self.last_language)
             return text.strip()
 
         except Exception:
             log.exception("Whisper transcription failed")
             return ""
+
+
+def _contains_wake_phrase(transcript):
+    """True when a transcript holds an accepted wake phrase at its start."""
+
+    return strip_wake_word(normalize(transcript or ""))[0]

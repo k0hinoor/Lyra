@@ -128,3 +128,42 @@ def test_check_for_updates_is_false_when_declined(monkeypatch):
 
     assert launcher.check_for_updates() is False
     assert installed == []
+
+
+# ------------------------------------------------------------
+# CORE FLAG PASS-THROUGH
+# ------------------------------------------------------------
+
+def _run_launcher(monkeypatch, argv):
+    """Run the launcher with a stubbed core and return the core's argv."""
+
+    captured = {}
+    monkeypatch.setattr(launcher.sys, "argv", argv)
+    monkeypatch.setattr(launcher, "check_for_updates", lambda: False)
+    monkeypatch.setattr(
+        launcher.runpy, "run_path",
+        lambda path, run_name=None: captured.setdefault("argv", list(launcher.sys.argv)),
+    )
+    assert launcher.main() == 0
+    return captured["argv"]
+
+
+def test_launcher_forwards_debug_wake_to_the_core(monkeypatch):
+    monkeypatch.setattr(launcher, "ensure_ollama", lambda: True)
+
+    argv = _run_launcher(monkeypatch, ["lyra-launcher", "--debug-wake", "--text"])
+
+    assert argv[0].endswith("main.py")
+    assert "--debug-wake" in argv
+    assert "--text" in argv                     # unknown core flags still pass through
+
+
+def test_launcher_forwards_mic_test_without_requiring_ollama(monkeypatch):
+    def fail():
+        raise AssertionError("--mic-test must not require Ollama")
+
+    monkeypatch.setattr(launcher, "ensure_ollama", fail)
+
+    argv = _run_launcher(monkeypatch, ["lyra-launcher", "--mic-test"])
+
+    assert "--mic-test" in argv

@@ -70,8 +70,10 @@ WHISPER_BEAM = 3              # 1 = fastest; 3–5 improves decoding at a CPU co
 
 # Words Whisper keeps mis-hearing ("brave" -> "breathe",
 # "terminate" -> "terminal"). Passed to faster-whisper as hotwords.
+# "Hey Lyra" comes first: the wake clip is decoded with this same bias, and
+# the wake phrase is the one thing that must survive a 1–2 second clip.
 WHISPER_HOTWORDS = (
-    "Lyra Brave Chrome YouTube Notepad terminate execution "
+    "Hey Lyra Lyra Brave Chrome YouTube Notepad terminate execution "
     "लायरा लाइरा ब्रेव क्रोम यूट्यूब नोटपैड"
 )
 
@@ -95,6 +97,15 @@ OUTPUT_DEVICE = None                # None = Windows default output.
                                     # Run `python main.py --devices` to list
                                     # yours, then set the index (e.g. 5).
 
+INPUT_DEVICE = None                 # None = Windows default input (the same
+                                    # index list as OUTPUT_DEVICE; see
+                                    # `python main.py --devices`).
+
+# Ceiling for the noise floor speech_recognition calibrates while starting.
+# A noisy room can calibrate a very high threshold and every later listen()
+# then waits for a louder sound, which looks exactly like a dead microphone.
+ENERGY_THRESHOLD_MAX = 1000         # RMS units; the cap never goes below 1
+
 # ------------------------------------------------------------
 # LISTENING
 # ------------------------------------------------------------
@@ -102,15 +113,50 @@ OUTPUT_DEVICE = None                # None = Windows default output.
 WAKE_MODE = "wake"            # "wake" = say "Hey Lyra" first | "always" = react to everything
 WAKE_WORD = "lyra"
 
+# One line per captured wake-gate clip:
+#   [wake-debug] engine=whisper lang=en heard='hey lira' -> WAKE
+# Same as starting LYRA with --debug-wake. Use it whenever "she ignores me"
+# has to be diagnosed: a miss is otherwise silent by design.
+WAKE_DEBUG = False
+
 # How Whisper commonly mis-hears the name — all treated as the wake word.
 WAKE_NATIVE_NAMES = ["लायरा", "लाइरा", "लीरा", "लैरा", "लाय्रा"]
-WAKE_ALIASES = ["lyra", "laira", "lira", "laura", "later", "leyra", "leira", "lyrah"] + WAKE_NATIVE_NAMES
+WAKE_ALIASES = [
+    "lyra", "laira", "lira", "laura", "later", "leyra", "leira", "lyrah",
+    # further mishearings reported from real 1–2 s wake clips
+    "lara", "leera", "lyre", "lyrics", "hilera",
+] + WAKE_NATIVE_NAMES
+
+# Only these may wake LYRA without a greeting. Everything above needs a
+# greeting ("hey lara"), so ordinary speech such as "see you later" or
+# "the lyrics are wrong" can never wake her.
+WAKE_BARE_NAMES = [WAKE_WORD] + WAKE_NATIVE_NAMES
+
 WAKE_EXPLICIT_VARIANTS = ["bobby"]  # accepted only after a wake prefix, per user testing
 
 WAKE_PREFIXES = [
     "hey", "ok", "okay", "hi", "hello", "yo", "hay",
+    # Whisper's usual spelling of a spoken "hey" in Hinglish audio.
+    "hai",
     "हे", "हेय", "हाय", "हेलो", "हैलो", "नमस्ते", "ओके",
 ]
+
+# Harmless lead-ins people put before the address: "a lyra", "uh lyra".
+WAKE_LEAD_FILLERS = ["a", "uh", "um", "er", "erm"]
+
+# Whole mis-hearings of "Hey Lyra" as one string, including the greeting glued
+# to the name ("heylyra", "hailyra"). The greeting + name shape below already
+# covers most of these; the explicit list keeps the accepted forms auditable
+# and survives future changes to the fuzzy matcher.
+WAKE_PHRASE_ALIASES = [
+    "hailyra", "heylyra", "hilyra", "oklyra", "hellolyra", "yolyra",
+    "a lyra", "hey laura", "hi lyra", "hello lyra", "ok lyra",
+]
+
+# Fuzzy candidates for the name in wake position. The edit distance is capped
+# by WAKE_FUZZY_MAX_DISTANCE (2 by default), so "hey lira"/"hey layra" match
+# while "hey there" and "hip hop" stay out.
+WAKE_FUZZY_CANDIDATES = WAKE_ALIASES + ["lera", "lyrra", "lyraa", "lirra"]
 
 FOLLOW_UP_SECONDS = 12        # after a reply, Lyra stays awake this long —
                               # you can keep talking without repeating the wake word
@@ -212,6 +258,44 @@ def clamp_interrupt_multiplier(value):
     )
 
 
+def clamp_energy_threshold(value, ceiling=None):
+    """Cap the noise floor speech_recognition calibrated for the microphone.
+
+    ``adjust_for_ambient_noise`` measures the room, and in a noisy room it can
+    settle on a threshold louder than a normal speaking voice; every later
+    ``listen()`` then ignores the user and the microphone looks broken. The
+    threshold is capped at ENERGY_THRESHOLD_MAX (1000 by default). Returns None
+    for values that are not numbers at all, and never returns less than 1 so a
+    zero floor cannot turn room noise into speech.
+    """
+    try:
+        threshold = float(value)
+    except (TypeError, ValueError):
+        return None
+    if ceiling is None:
+        ceiling = ENERGY_THRESHOLD_MAX
+    try:
+        ceiling = float(ceiling)
+    except (TypeError, ValueError):
+        ceiling = float(ENERGY_THRESHOLD_MAX)
+    return max(1.0, min(threshold, ceiling))
+
+
+def normalize_device_index(value):
+    """None (Windows default device) or an integer PortAudio device index.
+
+    Raises ValueError for anything that is not a whole number, so settings.json
+    and LYRA_* environment overrides are rejected the same way.
+    """
+    if value is None:
+        return None
+    if isinstance(value, str) and not value.strip():
+        return None
+    if isinstance(value, float) and not value.is_integer():
+        raise ValueError("must be a whole device index")
+    return int(value)
+
+
 def normalize_browser_name(value):
     """Canonical browser name, '' for the system default, None if unknown."""
     if value is None:
@@ -230,6 +314,9 @@ _SETTINGS = {
     "INTERRUPT_ENERGY_MULTIPLIER": "INTERRUPT_ENERGY_MULTIPLIER",
     "BROWSER": "BROWSER",
     "OUTPUT_DEVICE": "OUTPUT_DEVICE",
+    "INPUT_DEVICE": "INPUT_DEVICE",
+    "ENERGY_THRESHOLD_MAX": "ENERGY_THRESHOLD_MAX",
+    "WAKE_DEBUG": "WAKE_DEBUG",
     "WAKE_FUZZY_MAX_DISTANCE": "WAKE_FUZZY_MAX_DISTANCE",
     "WAKE_WINDOW_SECONDS": "WAKE_WINDOW_SECONDS",
     "WHISPER_MODEL": "WHISPER_MODEL",
@@ -256,8 +343,8 @@ def parse_boolean(value):
 
 def _parse_setting(target, value):
     """Use identical validation for settings.json and LYRA_* overrides."""
-    if target == "OUTPUT_DEVICE":
-        return None if value is None else int(value)
+    if target in ("OUTPUT_DEVICE", "INPUT_DEVICE"):
+        return normalize_device_index(value)
     if target == "WAKE_FUZZY_MAX_DISTANCE":
         value = int(value)
         if not 0 <= value <= 2:
@@ -278,6 +365,14 @@ def _parse_setting(target, value):
         value = clamp_interrupt_multiplier(value)
         if value is None:
             raise ValueError("must be a number for the interrupt multiplier")
+    elif target == "ENERGY_THRESHOLD_MAX":
+        try:
+            threshold = float(value)
+        except (TypeError, ValueError):
+            raise ValueError("must be a positive number of RMS units") from None
+        if threshold < 1:
+            raise ValueError("must be a positive number of RMS units")
+        value = threshold
     elif target == "BROWSER":
         value = normalize_browser_name(value)
         if value is None:
@@ -290,7 +385,7 @@ def _parse_setting(target, value):
         value = normalize_whisper_language(value)
         if value is None:
             raise ValueError("must be auto, en or hi")
-    elif target == "AUTO_REMEMBER_PREFERENCES":
+    elif target in ("AUTO_REMEMBER_PREFERENCES", "WAKE_DEBUG"):
         value = parse_boolean(value)
         if value is None:
             raise ValueError("must be true or false")
