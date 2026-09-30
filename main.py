@@ -683,7 +683,7 @@ def run_voice_mode(session, always_listening):
 
     import speech_recognition as sr
 
-    from lyra.ear import Ear
+    from lyra.ear import Ear, clean_transcript
     from lyra.voice import Voice
     from lyra.wake import WakeWordDetector, format_wake_debug
 
@@ -830,11 +830,21 @@ def run_voice_mode(session, always_listening):
                     if not assessment.matched:
                         continue
                     wake_gate_matched = True
-                    wake_gate_remainder = assessment.remainder
+                    # The wake transcript is RAW (so --debug-wake shows the
+                    # truth); anything used as a command is cleaned first so a
+                    # Whisper loop can never be answered as speech.
+                    wake_gate_remainder = clean_transcript(assessment.remainder)
                     lightweight_wake_hit = wake_detector.lightweight
                     # Run command-quality Whisper only on the short clip after
                     # the inexpensive wake recognizer has accepted a wake phrase.
-                    heard = ear.transcribe_audio(audio) if lightweight_wake_hit else wake_transcript
+                    if lightweight_wake_hit:
+                        heard = ear.transcribe_audio(audio)
+                    else:
+                        heard = clean_transcript(wake_transcript)
+                        if not heard:
+                            # "Hey Lyra" followed by a Whisper loop: keep the
+                            # wake, drop the loop (never answer it as speech).
+                            heard = config.WAKE_WORD.capitalize()
                 else:
                     heard = ear.transcribe_audio(audio)
 

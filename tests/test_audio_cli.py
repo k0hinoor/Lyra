@@ -497,3 +497,32 @@ def test_the_level_meter_bar_grows_with_the_level():
     assert quiet.count("#") < loud.count("#")
     assert main._level_bar(1000, peak=1000).count("#") == main.MIC_TEST_BAR_WIDTH
     assert main._level_bar(0, peak=0).count("#") == 0
+
+
+# ------------------------------------------------------------
+# BUG 2 — A WHISPER LOOP IN THE WAKE CLIP IS NEVER A COMMAND
+# ------------------------------------------------------------
+
+def test_a_loop_after_the_wake_phrase_wakes_but_is_never_answered(
+        audio_fakes, session, monkeypatch, capfd):
+    monkeypatch.setattr(config, "WAKE_DEBUG", True)
+    audio_fakes.Recognizer.listen_hook = _first_clip_then_stop()
+    loop = "Hey Lyra " + " ".join(["परेव"] * 7)
+    audio_fakes.Ear.wake_transcript = loop
+
+    main.run_voice_mode(session, always_listening=False)
+
+    output = capfd.readouterr().out
+    assert f"heard='{loop}' -> WAKE" in output        # debug shows the raw truth
+    assert session.brain.asked == []                  # the loop is never answered
+    assert "(awake for" in output                     # the wake itself is kept
+
+
+def test_a_stutter_after_the_wake_phrase_is_collapsed_before_routing(
+        audio_fakes, session, monkeypatch):
+    audio_fakes.Recognizer.listen_hook = _first_clip_then_stop()
+    audio_fakes.Ear.wake_transcript = "Hey Lyra why why why is the sky blue"
+
+    main.run_voice_mode(session, always_listening=False)
+
+    assert session.brain.asked == ["why is the sky blue"]
