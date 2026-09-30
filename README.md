@@ -286,7 +286,7 @@ The tests run without physical audio devices or Ollama. Hardware-dependent funct
 - **Ollama missing/not running:** install/start Ollama, then relaunch. The launcher offers a retry.
 - **Model missing:** consent to the launcher prompt or run `ollama pull phi4-mini:3.8b`.
 - **No lightweight wake detector:** run `python -m lyra.setup_wake_model`; without that optional model LYRA falls back to Whisper wake detection.
-- **Wake word not recognised / Lyra not hearing me:** run `.venv\\Scripts\\python.exe main.py --mic-test`. It shows a live level meter, tells you if the microphone is silent, and prints what Whisper heard when you say "Hey Lyra". Use `main.py --devices` to find your microphone's index and set `INPUT_DEVICE` in `settings.json`. Start with `--debug-wake` to print what the wake gate hears for every clip.
+- **Wake word not recognised / Lyra not hearing me:** run `.venv\Scripts\python.exe main.py --mic-test`. It shows a live level meter, tells you if the microphone is silent, and prints what Whisper heard when you say "Hey Lyra". Use `main.py --devices` to find your microphone's index and set `INPUT_DEVICE` in `settings.json`. Start with `--debug-wake` to print what the wake gate hears for every clip.
 - **No/wrong speaker:** run `.venv\Scripts\python.exe main.py --devices`, set `OUTPUT_DEVICE` in `settings.json`, then restart.
 - **Piper playback error:** inspect `%APPDATA%\Lyra\logs\lyra.log`. Diagnostics include sample rate, chunk byte count, output device, and stack traces; playback requires signed 16-bit mono PCM.
 - **No microphone access:** Windows Settings → Privacy & security → Microphone → allow desktop apps.
