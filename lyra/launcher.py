@@ -84,8 +84,8 @@ def check_for_updates():
     """Check for a GitHub Release and install it. True when files changed."""
     from .updater import check_latest_release, download_and_install
     try:
-        release = check_latest_release(timeout=5)
-    except Exception as exc:
+        release = check_latest_release()
+    except Exception as exc:  # network, DNS, timeout, bad JSON: never block launch
         log.info("GitHub update check unavailable; continuing offline: %s", exc)
         return False
     if release is None:

@@ -6,6 +6,7 @@ import logging
 import os
 import shutil
 import tempfile
+import threading
 import zipfile
 from pathlib import Path, PurePosixPath
 
@@ -25,11 +26,45 @@ def _version_tuple(value):
     return tuple(int(part) for part in parts)
 
 
-def check_latest_release(timeout=5):
+UPDATE_CHECK_TIMEOUT = (3.05, 5)  # (connect, read) seconds
+UPDATE_CHECK_DEADLINE = 8.0  # hard wall-clock cap for the whole check
+
+
+def _fetch_latest_release_json(timeout):
     url = f"https://api.github.com/repos/{config.GITHUB_REPOSITORY}/releases/latest"
     response = requests.get(url, timeout=timeout, headers={"Accept": "application/vnd.github+json"})
     response.raise_for_status()
-    release = response.json()
+    return response.json()
+
+
+def _run_with_deadline(func, deadline, *args):
+    """Run func in a daemon thread; raise TimeoutError after `deadline` seconds.
+
+    requests' timeouts don't cover DNS resolution or some proxy stalls, which is
+    what makes the check hang on some networks. A daemon thread can be abandoned.
+    """
+    result = {}
+
+    def target():
+        try:
+            result["value"] = func(*args)
+        except BaseException as exc:  # re-raised in caller thread
+            result["error"] = exc
+
+    worker = threading.Thread(target=target, name="lyra-update-check", daemon=True)
+    worker.start()
+    worker.join(deadline)
+    if worker.is_alive():
+        raise TimeoutError(f"GitHub update check exceeded {deadline:g}s")
+    if "error" in result:
+        raise result["error"]
+    return result["value"]
+
+
+def check_latest_release(timeout=UPDATE_CHECK_TIMEOUT, deadline=UPDATE_CHECK_DEADLINE):
+    if isinstance(timeout, (int, float)):
+        timeout = (min(float(timeout), 3.05), float(timeout))
+    release = _run_with_deadline(_fetch_latest_release_json, deadline, timeout)
     tag = release.get("tag_name", "")
     if _version_tuple(tag) <= _version_tuple(LYRA_VERSION):
         return None
