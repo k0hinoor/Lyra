@@ -9,6 +9,8 @@
 import re
 import time
 
+from ..messages import t
+
 try:
     import pyautogui
     pyautogui.PAUSE = 0
@@ -42,23 +44,23 @@ def handle(text, raw=None):
         pyautogui.hotkey("win", "down")
         time.sleep(0.15)
         pyautogui.hotkey("win", "down")
-        return "Minimized."
+        return t("windows.minimized")
 
     if re.match(r"^maximize(?: this| the| current)? window$", text):
         pyautogui.hotkey("win", "up")
-        return "Maximized."
+        return t("windows.maximized")
 
     if re.match(r"^show (?:the )?desktop$", text):
         pyautogui.hotkey("win", "d")
-        return "Showing desktop."
+        return t("windows.desktop")
 
     if text in ("switch window", "alt tab", "next window", "change window"):
         _hotkey("alt", "tab")
-        return "Switching."
+        return t("windows.switching")
 
     if text == "task view":
         pyautogui.hotkey("win", "tab")
-        return "Opening task view."
+        return t("windows.task_view")
 
     # --------------------------------------------------------
     # WINDOW LIFECYCLE
@@ -66,7 +68,7 @@ def handle(text, raw=None):
 
     if re.match(r"^close (?:this |the |that )?window$", text):
         pyautogui.hotkey("alt", "f4")
-        return "Closed window."
+        return t("windows.closed_window")
 
     # --------------------------------------------------------
     # TABS
@@ -74,42 +76,42 @@ def handle(text, raw=None):
 
     if text == "new tab":
         pyautogui.hotkey("ctrl", "t")
-        return "New tab."
+        return t("windows.new_tab")
 
     if text == "new window":
         pyautogui.hotkey("ctrl", "n")
-        return "New window."
+        return t("windows.new_window")
 
     if re.match(r"^close (?:this |the )?tab$", text):
         pyautogui.hotkey("ctrl", "w")
-        return "Closed tab."
+        return t("windows.closed_tab")
 
     if re.match(
         r"^(?:reopen|restore|undo close)(?: (?:the|this|that|my|last|closed))* tab$",
         text,
     ):
         pyautogui.hotkey("ctrl", "shift", "t")
-        return "Reopened tab."
+        return t("windows.reopened_tab")
 
     if re.match(r"^(?:next|switch|go to)(?: (?:the|my|next))* tab$", text):
         _hotkey("ctrl", "tab")
-        return "Next tab."
+        return t("windows.next_tab")
 
     if re.match(r"^(?:previous|last|back|go back)(?: (?:the|my|previous))* tab$", text):
         _hotkey("ctrl", "shift", "tab")
-        return "Previous tab."
+        return t("windows.previous_tab")
 
     if re.match(r"^(?:refresh|reload)(?: (?:the )?(?:page|tab|window|screen))?$", text):
         pyautogui.press("f5")
-        return "Refreshing."
+        return t("windows.refreshing")
 
     if re.match(r"^go back(?: page)?$", text):
         _hotkey("alt", "left")
-        return "Going back."
+        return t("windows.back")
 
     if re.match(r"^go forward(?: page)?$", text):
         _hotkey("alt", "right")
-        return "Going forward."
+        return t("windows.forward")
 
     # --------------------------------------------------------
     # SCROLL & ZOOM
@@ -120,15 +122,15 @@ def handle(text, raw=None):
     if match:
         amount = int(match.group(2) or 5)
         pyautogui.scroll(amount if match.group(1) == "up" else -amount)
-        return "Done."
+        return t("session.done")
 
     if text == "zoom in":
         _hotkey("ctrl", "+")
-        return "Zooming in."
+        return t("windows.zoom_in")
 
     if text == "zoom out":
         _hotkey("ctrl", "-")
-        return "Zooming out."
+        return t("windows.zoom_out")
 
     # --------------------------------------------------------
     # FULL SCREEN  (F11 — never a brightness level, never an app)
@@ -142,7 +144,7 @@ def handle(text, raw=None):
         text,
     ):
         pyautogui.press("f11")
-        return "Toggled fullscreen."
+        return t("windows.fullscreen")
 
     return None
 

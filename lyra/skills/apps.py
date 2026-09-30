@@ -16,6 +16,8 @@ import re
 import subprocess
 from pathlib import Path
 
+from ..messages import spoken_name, t
+
 OPEN_APPS = {
     "notepad": "notepad",
     "calculator": "calc",
@@ -245,8 +247,8 @@ def _open_or_report(target, pretty):
     try:
         _start(target)
     except OSError:
-        return f"I couldn't find an app called {pretty}."
-    return f"Opening {pretty}."
+        return t("apps.not_found", name=spoken_name(pretty))
+    return t("apps.opening", name=spoken_name(pretty))
 
 
 def open_by_name(name):
@@ -347,9 +349,9 @@ def handle(text, raw=None):
             )
 
             if result.returncode == 0:
-                return f"Closed {_pretty(name)}."
+                return t("apps.closed", name=spoken_name(_pretty(name)))
 
-        return f"I couldn't find {name} running."
+        return t("apps.not_running", name=spoken_name(name))
 
     # --------------------------------------------------------
     # OPEN APP / FOLDER / SETTINGS

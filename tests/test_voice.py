@@ -735,3 +735,43 @@ def test_hindi_packs_are_stored_separately_from_existing_english_packs(monkeypat
     calls.clear()
     voice_module.ensure_voice_pack(model)
     assert calls == []
+
+
+# ------------------------------------------------------------
+# SPEECH_LANGUAGE="hi": the Hindi pack speaks everything (brief §7.2)
+# ------------------------------------------------------------
+
+def test_hindi_mode_uses_the_hindi_pack_for_every_sentence(bilingual_pack, monkeypatch):
+    monkeypatch.setattr(config, "SPEECH_LANGUAGE", "hi")
+    voice = voice_module.Voice()                       # no language: follows the mode
+    assert voice.ok
+    # A sentence with only Latin names would otherwise go to the English pack.
+    assert voice._piper_for_text("Ollama") is bilingual_pack.hindi
+    assert voice._piper_for_text("नोटपैड खोल रही हूँ।") is bilingual_pack.hindi
+    assert config.VOICE_MODEL not in bilingual_pack.loads   # English pack never loaded
+
+
+def test_auto_mode_still_switches_packs_by_sentence(bilingual_pack):
+    voice = bilingual_pack.build()
+    assert voice._piper_for_text("Opening Notepad.") is bilingual_pack.english
+    assert voice._piper_for_text("नमस्ते") is bilingual_pack.hindi
+
+
+def test_explicit_english_voice_is_not_forced_in_hindi_mode(bilingual_pack, monkeypatch):
+    monkeypatch.setattr(config, "SPEECH_LANGUAGE", "hi")
+    voice = bilingual_pack.build("en")
+    assert voice._piper_for_text("Hello there.") is bilingual_pack.english
+
+
+def test_a_missing_hindi_model_names_the_setup_command(bilingual_pack, monkeypatch, capsys):
+    monkeypatch.setattr(config, "SPEECH_LANGUAGE", "hi")
+
+    def missing(model=None):
+        raise IOError("no network, no pack")
+
+    monkeypatch.setattr(voice_module, "ensure_voice_pack", missing)
+    voice = voice_module.Voice()
+    out = capsys.readouterr().out
+    assert voice.ok is False
+    assert "python -m lyra.setup_voice --language hi" in out
+    assert "Text replies are still available" in out

@@ -16,6 +16,7 @@
 import re
 
 from .. import config
+from ..messages import t
 from ..utils import normalize
 
 try:
@@ -45,8 +46,6 @@ except Exception:
     pass
 
 
-_NO_PYCAW = "Volume control needs the pycaw package."
-_NO_BRIGHTNESS = "Brightness control needs the screen-brightness-control package."
 
 DEFAULT_STEP = 10           # "volume up" with no number moves ten points
 SMALL_STEP = 5              # "... a bit"
@@ -527,20 +526,20 @@ def _clamp(value, ceiling):
 def _run_volume(action, amount):
 
     if not _AUDIO_OK:
-        return _NO_PYCAW
+        return t("media.no_pycaw")
 
     try:
 
         if action == "read":
-            return f"Volume is at {_current_volume()} percent."
+            return t("media.volume_is", level=_current_volume())
 
         if action == "mute":
             _set_muted(True)
-            return "Muted."
+            return t("media.muted")
 
         if action == "unmute":
             _set_muted(False)
-            return "Unmuted."
+            return t("media.unmuted")
 
         ceiling = config.MAX_VOLUME
 
@@ -558,9 +557,9 @@ def _run_volume(action, amount):
     except Exception as e:
         print(f"Volume error: {e}")
         return (
-            "I couldn't read the volume."
+            t("media.volume_read_failed")
             if action == "read"
-            else "I couldn't change the volume."
+            else t("media.volume_change_failed")
         )
 
     if action == "up" and _is_muted():
@@ -569,26 +568,26 @@ def _run_volume(action, amount):
             _set_muted(False)
         except Exception as e:
             print(f"Unmute error: {e}")
-            return f"Volume is muted, volume set to {level} percent."
-        return f"Unmuted, volume set to {level} percent."
+            return t("media.volume_still_muted", level=level)
+        return t("media.unmuted_volume_set", level=level)
 
     if wanted is not None and wanted > ceiling:
-        return f"Volume set to {level} percent, that is the maximum."
+        return t("media.volume_set_max", level=level)
 
-    return f"Volume set to {level} percent."
+    return t("media.volume_set", level=level)
 
 
 def _run_brightness(action, amount):
 
     if not _BRIGHTNESS_OK:
-        return _NO_BRIGHTNESS
+        return t("media.no_brightness")
 
     ceiling = config.MAX_BRIGHTNESS
 
     try:
 
         if action == "read":
-            return f"Brightness is at {sbc.get_brightness()[0]} percent."
+            return t("media.brightness_is", level=sbc.get_brightness()[0])
 
         if action == "set":
             wanted = amount
@@ -606,15 +605,15 @@ def _run_brightness(action, amount):
     except Exception as e:
         print(f"Brightness error: {e}")
         return (
-            "I couldn't read the brightness."
+            t("media.brightness_read_failed")
             if action == "read"
-            else "I couldn't change the brightness."
+            else t("media.brightness_change_failed")
         )
 
     if wanted is not None and wanted > ceiling:
-        return f"Brightness set to {level} percent, that is the maximum."
+        return t("media.brightness_set_max", level=level)
 
-    return f"Brightness set to {level} percent."
+    return t("media.brightness_set", level=level)
 
 
 # ------------------------------------------------------------
@@ -672,21 +671,21 @@ def handle(text, raw=None):
 
     if re.match(rf"^(?:play|resume|start){optional}$", lowered):
         _press_media("playpause")
-        return "Playing."
+        return t("media.playing")
 
     if re.match(rf"^pause{optional}$", lowered) \
             or re.match(rf"^(?:stop|halt){required}$", lowered):
         _press_media("playpause")
-        return "Paused."
+        return t("media.paused")
 
     if re.match(r"^(?:next|skip)(?: (?:the |this )?(?:track|song|video|media))?$", lowered) \
             or re.match(rf"^skip (?:to )?(?:the )?next{required}$", lowered):
         _press_media("nexttrack")
-        return "Next track."
+        return t("media.next")
 
     if re.match(r"^(?:previous|last)(?: (?:the )?(?:track|song|video|media))?$", lowered):
         _press_media("prevtrack")
-        return "Previous track."
+        return t("media.previous")
 
     return None
 
