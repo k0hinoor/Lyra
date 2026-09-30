@@ -30,7 +30,7 @@ import time
 
 import numpy as np
 
-from lyra import config
+from lyra import config, hindi
 from lyra.memory import Memory
 from lyra.preferences import extract_preferences, is_taste_conversation
 from lyra.skills import Confirmation, apps, route_with_handler
@@ -178,6 +178,16 @@ class Session:
         confirmed = any(word in text for word in config.CONFIRM_WORDS)
         cancelled = any(word in text for word in config.CANCEL_WORDS)
 
+        if config.SPEECH_LANGUAGE == "hi":
+            # "हाँ" / "नहीं": Whisper writes Hindi answers in Devanagari.
+            spelled = hindi.spelling_key(text)
+            confirmed = confirmed or any(
+                hindi.spelling_key(word) in spelled for word in config.HINDI_CONFIRM_WORDS
+            )
+            cancelled = cancelled or any(
+                hindi.spelling_key(word) in spelled for word in config.HINDI_CANCEL_WORDS
+            )
+
         if confirmed and not cancelled:
 
             confirmation = self.pending_confirmation
@@ -323,6 +333,17 @@ class Session:
     # PROCESS ONE COMMAND
     # --------------------------------------------------------
 
+    @staticmethod
+    def _hindi_intent(text):
+        """English command for recognised Hindi vocabulary (hi mode only)."""
+
+        if config.SPEECH_LANGUAGE != "hi":
+            return None
+        command = hindi.to_command(text)
+        if command is not None:
+            log.info("Hindi intent: %r -> %r", text, command)
+        return command
+
     def process(self, text, raw=None, _heard=None):
         """Process one already-wake-stripped command. Returns True to exit."""
 
@@ -333,6 +354,18 @@ class Session:
 
         if not normalized:
             return False
+
+        # What the user really said goes to the chat model and to preference
+        # capture, even when the Hindi layer below rewrote it for the skills.
+        chat_raw = raw
+
+        # SPEECH_LANGUAGE="hi": recognised Hindi command vocabulary is
+        # rewritten to the English phrasing the skills understand
+        # ("नोटपैड खोलो" -> "open notepad"). Anything else is left alone.
+        intent = self._hindi_intent(text)
+        if intent is not None:
+            text = raw = intent
+            normalized = strip_politeness(normalize(intent))
 
         # terminate
         if is_terminate(normalized):
@@ -388,8 +421,8 @@ class Session:
         reply, confirmation = self._handle_memory(normalized, raw)
         handler = "memory" if (reply is not None or confirmation is not None) else None
 
-        preferences = extract_preferences(raw)
-        taste_conversation = is_taste_conversation(raw)
+        preferences = extract_preferences(chat_raw)
+        taste_conversation = is_taste_conversation(chat_raw)
         if reply is None and confirmation is None and not taste_conversation:
             # skills (PC control) first. Run-on web patterns like
             # "open brave and open youtube" are answered directly there —
@@ -422,7 +455,7 @@ class Session:
         )
 
         # brain (LLM) — streamed sentence by sentence
-        self.say_stream(self.brain.ask_stream(raw.strip()), handler="chat model")
+        self.say_stream(self.brain.ask_stream(chat_raw.strip()), handler="chat model")
 
         return False
 
